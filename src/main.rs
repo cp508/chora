@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use chora::cli::{Cli, Cmd, HELP_TREE, OpenTarget, parse_date_arg};
+use chora::cli::{Cli, Cmd, OpenTarget, parse_date_arg, render_help_tree};
 use chora::config::Config;
 use chora::error::ChoraError;
 use chora::store::Store;
@@ -14,7 +14,7 @@ fn main() -> anyhow::Result<()> {
     chora::log::init(cli.debug);
     chora::debug_log!("debug logging on");
     let Some(cmd) = cli.cmd else {
-        print!("{HELP_TREE}");
+        print!("{}", render_help_tree());
         return Ok(());
     };
     match cmd {

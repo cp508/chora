@@ -2,7 +2,7 @@
 name = "chora"
 version = "0.1.0"
 edition = "2024"
-description = "Лёгкий CLI-органайзер: markdown-заметки, календарь, git-синк"
+description = "Lightweight CLI organizer: markdown notes, day events, git sync"
 license = "MIT"
 
 [[bin]]
@@ -15,6 +15,7 @@ path = "src/lib.rs"
 
 [dependencies]
 anyhow = "1"
+anstyle = "1"
 chrono = "0.4"
 clap = { version = "4", features = ["derive"] }
 crossterm = "0.28"

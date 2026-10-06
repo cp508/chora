@@ -35,6 +35,78 @@ Options:
 Openers: `editor` for files, `open_dirs` for directories, $EDITOR when empty.
 "#;
 
+/// Nesting colors for the tree: headers, level-1 commands, level-2 args.
+fn header_style() -> anstyle::Style {
+    anstyle::Style::new()
+        .bold()
+        .fg_color(Some(anstyle::Color::Ansi(anstyle::AnsiColor::Yellow)))
+}
+
+fn command_style() -> anstyle::Style {
+    anstyle::Style::new()
+        .bold()
+        .fg_color(Some(anstyle::Color::Ansi(anstyle::AnsiColor::Green)))
+}
+
+fn arg_style() -> anstyle::Style {
+    anstyle::Style::new().fg_color(Some(anstyle::Color::Ansi(anstyle::AnsiColor::Cyan)))
+}
+
+fn dim_style() -> anstyle::Style {
+    anstyle::Style::new().dimmed()
+}
+
+fn paint(style: anstyle::Style, text: &str) -> String {
+    format!("{style}{text}{style:#}")
+}
+
+/// Paint one tree line by its nesting level. Descriptions keep the base color.
+fn style_line(line: &str) -> String {
+    if line.trim().is_empty() {
+        return line.to_owned();
+    }
+    let indent = line.len() - line.trim_start().len();
+    if indent == 0 {
+        if line.ends_with(':') {
+            return paint(header_style(), line);
+        }
+        return paint(dim_style(), line);
+    }
+    let trimmed = line.trim_start();
+    let pad = &line[..line.len() - trimmed.len()];
+    let end = trimmed.find(char::is_whitespace).unwrap_or(trimmed.len());
+    let (head, tail) = (&trimmed[..end], &trimmed[end..]);
+    let style = if indent == 2 {
+        command_style()
+    } else if indent == 4 {
+        arg_style()
+    } else {
+        return paint(dim_style(), line);
+    };
+    format!("{pad}{}{tail}", paint(style, head))
+}
+
+/// The tree with nesting colors. Pure: always paints.
+fn colorize_tree(text: &str) -> String {
+    text.lines().map(style_line).collect::<Vec<_>>().join("\n") + "\n"
+}
+
+/// Colors only for a live terminal; pipes and `NO_COLOR` stay plain.
+fn use_color() -> bool {
+    use std::io::IsTerminal;
+    std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none()
+}
+
+/// The tree for bare `chora`: colored on a terminal, plain otherwise.
+#[must_use]
+pub fn render_help_tree() -> String {
+    if use_color() {
+        colorize_tree(HELP_TREE)
+    } else {
+        HELP_TREE.to_owned()
+    }
+}
+
 /// `chora [--dir <path>] [--debug] <command>`. No command prints the tree.
 #[derive(Debug, Parser)]
 #[command(
@@ -123,10 +195,48 @@ pub fn parse_date_arg(raw: &str) -> anyhow::Result<NaiveDate> {
 mod tests {
     use super::*;
 
+    fn strip_ansi(text: &str) -> String {
+        let mut out = String::new();
+        let mut chars = text.chars();
+        while let Some(ch) = chars.next() {
+            if ch == '\u{1b}' {
+                for ch in chars.by_ref() {
+                    if ch.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+            } else {
+                out.push(ch);
+            }
+        }
+        out
+    }
+
     #[test]
     fn bare_chora_has_no_command() {
         let cli = Cli::try_parse_from(["chora"]).unwrap();
         assert!(cli.cmd.is_none());
+    }
+
+    #[test]
+    fn tree_coloring_survives_ansi_strip() {
+        let colored = colorize_tree(HELP_TREE);
+        assert!(colored.contains("\u{1b}["));
+        assert_eq!(strip_ansi(&colored), HELP_TREE);
+    }
+
+    #[test]
+    fn tree_paints_nesting_levels() {
+        let out = colorize_tree("Commands:\n  init           Bootstrap.\n    --date <DATE>\n");
+        let mut lines = out.lines();
+        let header = lines.next().unwrap();
+        assert!(header.starts_with("\u{1b}["));
+        assert!(header.ends_with("\u{1b}[0m"));
+        let cmd = lines.next().unwrap();
+        assert!(cmd.starts_with("  \u{1b}["));
+        let arg = lines.next().unwrap();
+        assert!(arg.starts_with("    \u{1b}["));
+        assert_ne!(cmd, arg);
     }
 
     #[test]
