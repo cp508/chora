@@ -397,6 +397,33 @@ fn open_events_opens_the_events_dir() {
 }
 
 #[test]
+fn open_runs_dirs_opener_inside_target_dir() {
+    let env = setup();
+    assert!(cmd(&env).arg("init").output().unwrap().status.success());
+
+    // `sh -c '... $(fzf)'` openers scan cwd, so cwd must be the target dir,
+    // otherwise both notes/ and events/ show up at once.
+    let editor = editor_script(&env, "pwd.sh", "#!/bin/sh\npwd > \"$1/pwd.txt\"\n");
+    let root = storage(&env);
+    let out = cmd(&env)
+        .env("EDITOR", &editor)
+        .args(["--dir", &root.to_string_lossy(), "open", "notes"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let seen = std::fs::read_to_string(root.join("notes").join("pwd.txt")).unwrap();
+    assert_eq!(
+        Path::new(seen.trim()),
+        root.join("notes"),
+        "dirs-opener cwd must be the target dir"
+    );
+}
+
+#[test]
 fn open_rejects_unknown_target() {
     let env = setup();
     assert!(cmd(&env).arg("init").output().unwrap().status.success());

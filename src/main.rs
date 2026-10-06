@@ -26,7 +26,9 @@ fn main() -> anyhow::Result<()> {
                 OpenTarget::Notes => (store.notes_dir(), "notes"),
                 OpenTarget::Events => (store.events_dir(), "events"),
             };
-            editor::open(&dir, store.root(), dirs_opener(&cfg))?;
+            // cwd = target: `sh -c '... $(fzf)'` openers scan cwd and ignore
+            // the target arg (it lands in $0), so root would show both dirs.
+            editor::open(&dir, &dir, dirs_opener(&cfg))?;
             commit_and_push(&store, &format!("open: {name}"))
         }
         Cmd::Event {
