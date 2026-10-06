@@ -10,6 +10,7 @@ use crate::error::ChoraError;
 
 /// Run `git -C <dir> <args>`, return the output as is.
 fn git(dir: &Path, args: &[&str]) -> anyhow::Result<Output> {
+    crate::debug_log!("git -C {} {}", dir.display(), args.join(" "));
     Command::new("git")
         .arg("-C")
         .arg(dir)
@@ -125,6 +126,18 @@ pub fn push(dir: &Path) -> anyhow::Result<()> {
     } else {
         Err(ChoraError::Git(stderr_of(&upstream)).into())
     }
+}
+
+/// Synchronous final commit for the detached `__finalize` child.
+/// The commit itself is strict (data is local); the push is best-effort —
+/// offline is normal, the next run will push.
+pub fn finalize(dir: &Path, message: &str) -> anyhow::Result<()> {
+    crate::debug_log!("finalize: {message} in {}", dir.display());
+    add_all(dir)?;
+    if commit(dir, message)? {
+        let _ = push(dir);
+    }
+    Ok(())
 }
 
 /// Timestamp for commit messages: `autocommit: <ISO-timestamp>`.

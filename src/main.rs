@@ -11,8 +11,15 @@ use clap::Parser;
 
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
+    chora::log::init(cli.debug);
+    chora::debug_log!("debug logging on");
     match cli.cmd {
         Cmd::Init => cmd_init(),
+        Cmd::__Finalize { message } => {
+            let (_cfg, store) = load_store(cli.dir.as_deref())?;
+            require_repo(&store)?;
+            git::finalize(store.root(), &message)
+        }
         Cmd::Note => {
             let (cfg, store) = load_store(cli.dir.as_deref())?;
             require_repo(&store)?;
@@ -52,6 +59,7 @@ fn main() -> anyhow::Result<()> {
 fn load_store(dir: Option<&Path>) -> anyhow::Result<(Config, Store)> {
     let cfg = Config::load()?;
     let store = Store::new(cfg.root(dir));
+    chora::debug_log!("root: {}", store.root().display());
     store.ensure_layout()?;
     Ok((cfg, store))
 }
@@ -82,7 +90,10 @@ fn commit_and_push(store: &Store, message: &str) -> anyhow::Result<()> {
 
 /// `init` takes no flags: everything comes from the config file.
 fn cmd_init() -> anyhow::Result<()> {
-    let cfg_path = Config::ensure_exists()?;
+    let ensured = Config::ensure_exists()?;
+    if !ensured.added.is_empty() {
+        println!("new config fields added: {}", ensured.added.join(", "));
+    }
     let cfg = Config::load()?;
     let store = Store::new(cfg.root(None));
     store.ensure_layout()?;
@@ -94,8 +105,8 @@ fn cmd_init() -> anyhow::Result<()> {
         git::add_remote(store.root(), &cfg.main.remote_url)?;
     }
     if !git::identity_ok(store.root()) {
-        eprintln!(
-            "warning: git user.name/user.email are not set; commits will fail. Set them, e.g. `git config --global user.name \"you\"`"
+        chora::warn_log!(
+            "git user.name/user.email are not set; commits will fail. Set them, e.g. `git config --global user.name \"you\"`"
         );
     }
     git::add_all(store.root())?;
@@ -103,7 +114,7 @@ fn cmd_init() -> anyhow::Result<()> {
         // Best-effort: the remote may be empty or offline on first run.
         let _ = git::push(store.root());
     }
-    println!("config: {}", cfg_path.display());
+    println!("config: {}", ensured.path.display());
     println!("storage: {}", store.root().display());
     println!("Edit remote_url in the config, then re-run `chora init`.");
     Ok(())

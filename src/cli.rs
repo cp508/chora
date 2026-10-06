@@ -21,6 +21,10 @@ pub struct Cli {
     #[arg(long, global = true, value_name = "PATH")]
     pub dir: Option<PathBuf>,
 
+    /// Verbose internals on stderr (levels: error, warn, info, debug).
+    #[arg(long, global = true)]
+    pub debug: bool,
+
     #[command(subcommand)]
     pub cmd: Cmd,
 }
@@ -52,6 +56,13 @@ pub enum Cmd {
         /// JSON array for scripts.
         #[arg(long)]
         json: bool,
+    },
+    /// Background final commit (spawned detached by `note`, not for humans).
+    #[command(name = "__finalize", hide = true)]
+    __Finalize {
+        /// Commit message, precomputed by the parent process.
+        #[arg(long)]
+        message: String,
     },
 }
 
@@ -123,5 +134,13 @@ mod tests {
         for raw in ["", "yesterday", "20-11-2026", "2026-13-01"] {
             assert!(parse_date_arg(raw).is_err(), "{raw}");
         }
+    }
+
+    #[test]
+    fn debug_flag_is_global() {
+        let cli = Cli::try_parse_from(["chora", "--debug", "show", "--date", "today"]).unwrap();
+        assert!(cli.debug);
+        let cli = Cli::try_parse_from(["chora", "show", "--date", "today"]).unwrap();
+        assert!(!cli.debug);
     }
 }

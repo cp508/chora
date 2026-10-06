@@ -183,8 +183,20 @@ fn note_session_edits_and_final_commits() {
     );
 
     assert!(root.join("notes").join("hi.md").exists());
-    let log = git_log(&root);
+    let log = wait_for_log(&root, "final:");
     assert!(log.lines().any(|line| line.starts_with("final:")), "{log}");
+}
+
+/// The final commit of `note` lands in the background: poll for it.
+fn wait_for_log(root: &Path, prefix: &str) -> String {
+    for _ in 0..100 {
+        let log = git_log(root);
+        if log.lines().any(|line| line.starts_with(prefix)) {
+            return log;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    panic!("timed out waiting for a commit starting with {prefix}");
 }
 
 #[test]
@@ -330,4 +342,35 @@ fn note_uses_config_editor_over_env() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(root.join("notes").join("hi.md").exists());
+}
+
+#[test]
+fn init_migrates_old_config_with_new_marker() {
+    let env = setup();
+    // A config from an older program version: no editor/remote_url yet.
+    let cfg = env.home.join(".config").join("chora").join("config.toml");
+    std::fs::create_dir_all(cfg.parent().unwrap()).unwrap();
+    std::fs::write(
+        &cfg,
+        "# my tweaks\n[main]\nchora_dir = \"~/chora\"\nauto_commit = 7\n",
+    )
+    .unwrap();
+
+    let out = cmd(&env).arg("init").output().unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(String::from_utf8_lossy(&out.stdout).contains("new config fields added"));
+
+    let text = std::fs::read_to_string(&cfg).unwrap();
+    assert!(text.contains("# my tweaks"));
+    assert!(text.contains("auto_commit = 7"));
+    assert!(text.contains("# NEW\neditor = \"\"\nremote_url = \"\"\n"));
+
+    // Second init stays quiet.
+    let out = cmd(&env).arg("init").output().unwrap();
+    assert!(out.status.success());
+    assert!(!String::from_utf8_lossy(&out.stdout).contains("new config fields added"));
 }

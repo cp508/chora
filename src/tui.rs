@@ -232,6 +232,7 @@ impl App {
             self.error = Some(String::from("bad duration: expected 45m, 2h, 1h30m"));
             return;
         }
+        crate::debug_log!("tui submit: {} {}", self.date_buf.trim(), self.name.trim());
         self.done = true;
     }
 

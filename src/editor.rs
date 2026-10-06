@@ -24,6 +24,7 @@ pub fn open(target: &Path, cwd: &Path, configured: Option<&str>) -> anyhow::Resu
         return Err(ChoraError::EditorMissing.into());
     }
     let program = parts.remove(0);
+    crate::debug_log!("opener: {program} {}", target.display());
     let status = Command::new(&program)
         .args(&parts)
         .arg(target)

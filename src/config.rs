@@ -42,6 +42,29 @@ impl Default for Main {
     }
 }
 
+/// What `ensure_exists` did.
+#[derive(Debug)]
+pub struct Ensured {
+    /// Path to the config file.
+    pub path: PathBuf,
+    /// Keys appended under `# NEW` during this run (empty when nothing was missing).
+    pub added: Vec<String>,
+}
+
+/// Default `[main]` keys in canonical order with their default TOML values.
+fn known_fields() -> Vec<(&'static str, toml::Value)> {
+    let defaults = Main::default();
+    vec![
+        ("chora_dir", toml::Value::String(defaults.chora_dir)),
+        (
+            "auto_commit",
+            toml::Value::Integer(defaults.auto_commit as i64),
+        ),
+        ("editor", toml::Value::String(defaults.editor)),
+        ("remote_url", toml::Value::String(defaults.remote_url)),
+    ]
+}
+
 impl Config {
     /// Path to the config file (`$HOME/.config/chora/config.toml`).
     #[must_use]
@@ -57,6 +80,7 @@ impl Config {
 
     /// Read the config from an explicit path (extension point for tests).
     pub fn load_from(path: &Path) -> anyhow::Result<Self> {
+        crate::debug_log!("config: {}", path.display());
         let text = match std::fs::read_to_string(path) {
             Ok(text) => text,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
@@ -75,10 +99,16 @@ impl Config {
         Ok(cfg)
     }
 
-    /// Create the config with defaults if missing. Returns the path.
-    /// Idempotent: never touches an existing file.
-    pub fn ensure_exists() -> anyhow::Result<PathBuf> {
+    /// Create the config with defaults if missing; append missing keys under
+    /// `# NEW` when the program grew new fields (update path).
+    /// Never touches existing values. Returns the path plus added keys.
+    pub fn ensure_exists() -> anyhow::Result<Ensured> {
         let path = Self::path().context("failed to determine the config directory")?;
+        Self::ensure_exists_at(&path)
+    }
+
+    /// Testable core of [`Self::ensure_exists`] over an explicit path.
+    pub fn ensure_exists_at(path: &Path) -> anyhow::Result<Ensured> {
         if !path.exists() {
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent)
@@ -86,10 +116,61 @@ impl Config {
             }
             let text = toml::to_string_pretty(&Self::default())
                 .context("failed to serialize the default config")?;
-            std::fs::write(&path, text)
+            std::fs::write(path, text)
                 .with_context(|| format!("failed to write {}", path.display()))?;
+            return Ok(Ensured {
+                path: path.to_path_buf(),
+                added: Vec::new(),
+            });
         }
-        Ok(path)
+        let text = std::fs::read_to_string(path)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        let table: toml::Table = match toml::from_str(&text) {
+            Ok(table) => table,
+            // Leave broken files to load(): it reports them precisely.
+            Err(_) => {
+                return Ok(Ensured {
+                    path: path.to_path_buf(),
+                    added: Vec::new(),
+                });
+            }
+        };
+        let has_main = table.contains_key("main");
+        let present: Vec<String> = table
+            .get("main")
+            .and_then(|main| main.as_table())
+            .map(|main| main.keys().cloned().collect())
+            .unwrap_or_default();
+        let missing: Vec<(&str, toml::Value)> = known_fields()
+            .into_iter()
+            .filter(|(key, _)| !present.iter().any(|got| got == key))
+            .collect();
+        if missing.is_empty() {
+            return Ok(Ensured {
+                path: path.to_path_buf(),
+                added: Vec::new(),
+            });
+        }
+        let mut out = text;
+        if !out.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push('\n');
+        if !has_main {
+            out.push_str("[main]\n");
+        }
+        out.push_str("# NEW\n");
+        let mut added = Vec::new();
+        for (key, value) in &missing {
+            out.push_str(&format!("{key} = {value}\n"));
+            added.push((*key).to_owned());
+        }
+        std::fs::write(path, &out)
+            .with_context(|| format!("failed to write {}", path.display()))?;
+        Ok(Ensured {
+            path: path.to_path_buf(),
+            added,
+        })
     }
 
     /// Storage root: `--dir` > `chora_dir` > `~/chora`.
@@ -220,5 +301,62 @@ mod tests {
         let path = dir.path().join("config.toml");
         std::fs::write(&path, "not toml [[[").unwrap();
         assert!(Config::load_from(&path).is_err());
+    }
+
+    #[test]
+    fn ensure_creates_defaults_from_scratch() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let ensured = Config::ensure_exists_at(&path).unwrap();
+        assert!(ensured.added.is_empty());
+        let cfg = Config::load_from(&path).unwrap();
+        assert_eq!(cfg.main.chora_dir, "~/chora");
+        assert_eq!(cfg.main.auto_commit, 10);
+        assert!(cfg.main.editor.is_empty());
+        assert!(cfg.main.remote_url.is_empty());
+    }
+
+    #[test]
+    fn ensure_appends_new_fields_under_new_marker() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "# my old config\n[main]\nchora_dir = \"/tmp/keep\"\nauto_commit = 3\n",
+        )
+        .unwrap();
+        let ensured = Config::ensure_exists_at(&path).unwrap();
+        assert_eq!(ensured.added, vec!["editor", "remote_url"]);
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("# my old config"));
+        assert!(text.contains("# NEW\neditor = \"\"\nremote_url = \"\"\n"));
+        let cfg = Config::load_from(&path).unwrap();
+        assert_eq!(cfg.main.chora_dir, "/tmp/keep");
+        assert_eq!(cfg.main.auto_commit, 3);
+    }
+
+    #[test]
+    fn ensure_is_quiet_when_current() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[main]\nchora_dir = \"/tmp/c\"\nauto_commit = 5\neditor = \"yazi\"\nremote_url = \"\"\n",
+        )
+        .unwrap();
+        let before = std::fs::read_to_string(&path).unwrap();
+        let ensured = Config::ensure_exists_at(&path).unwrap();
+        assert!(ensured.added.is_empty());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn ensure_leaves_broken_files_to_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "not toml [[[").unwrap();
+        let ensured = Config::ensure_exists_at(&path).unwrap();
+        assert!(ensured.added.is_empty());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "not toml [[[");
     }
 }

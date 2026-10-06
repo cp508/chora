@@ -3,6 +3,9 @@
 //! The ticker is a plain `std::thread`; no async runtime is needed since
 //! all the work is synchronous (opener + `git` CLI).
 //!
+//! Exit is instant: once the opener closes, a detached `__finalize` child
+//! finishes the commit in the background (disown semantics).
+//!
 //! `Ctrl-C`: the process and the child opener share the terminal's
 //! foreground group, so SIGINT reaches both and nothing is left hanging.
 //! A final commit on `Ctrl-C` is not MVP.
@@ -38,16 +41,47 @@ pub fn run(
     stop.store(true, Ordering::Relaxed);
     let _ = ticker.join();
 
-    // Data matters more than the exit code: final commit even if the opener failed.
-    final_tick(root)?;
+    // Back to the terminal instantly: the final commit finishes detached.
+    // If spawning fails, commit inline so no data is lost.
+    let message = format!("final: {}", git::stamp_now());
+    if let Err(err) = spawn_finalize(root, &message) {
+        crate::debug_log!("finalize spawn failed ({err}), committing inline");
+        final_tick(root)?;
+    }
     edit
 }
 
-/// Ticker: sleep in one-second chunks so stopping after the opener exits
-/// is fast instead of taking the whole interval.
+/// Fire-and-forget final commit: stdio goes to null, own process group —
+/// the shell is usable the moment the opener exits.
+fn spawn_finalize(root: &Path, message: &str) -> anyhow::Result<()> {
+    use anyhow::Context;
+    use std::process::Stdio;
+
+    let exe = std::env::current_exe().context("failed to locate the chora binary")?;
+    let mut cmd = std::process::Command::new(exe);
+    cmd.arg("--dir")
+        .arg(root)
+        .arg("__finalize")
+        .arg("--message")
+        .arg(message);
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+    cmd.spawn()
+        .context("failed to spawn the background commit")?;
+    Ok(())
+}
+
+/// Ticker: sleep in short chunks so stopping after the opener exits
+/// is instant instead of taking the whole interval.
 fn ticker_loop(root: &Path, every: Duration, stop: &AtomicBool) {
     let mut waited = Duration::ZERO;
-    let step = Duration::from_secs(1);
+    let step = Duration::from_millis(100);
     loop {
         std::thread::sleep(step);
         if stop.load(Ordering::Relaxed) {
