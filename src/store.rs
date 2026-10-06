@@ -5,8 +5,17 @@ use std::path::{Path, PathBuf};
 use anyhow::Context;
 use chrono::NaiveDate;
 
+use crate::config::OldEventPolicy;
+
 pub struct Store {
     root: PathBuf,
+}
+
+/// What a sweep of passed day files did.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct SweepReport {
+    pub deleted: usize,
+    pub backlogged: usize,
 }
 
 impl Store {
@@ -33,6 +42,12 @@ impl Store {
     #[must_use]
     pub fn notes_dir(&self) -> PathBuf {
         self.root.join("notes")
+    }
+
+    /// Archive for passed day files under the `backlog` policy.
+    #[must_use]
+    pub fn backlog_dir(&self) -> PathBuf {
+        self.events_dir().join("backlog")
     }
 
     /// Strictly ISO `events/YYYY-MM-DD.md`.
@@ -71,6 +86,64 @@ impl Store {
                 .with_context(|| format!("failed to write {}", path.display()))?;
         }
         Ok(())
+    }
+
+    /// Delete or archive day files older than `today` per `policy`.
+    /// Only top-level `events/YYYY-MM-DD.md` files; anything else
+    /// (notes, `backlog/`, stray files) is left alone. `Nothing` never
+    /// even scans.
+    pub fn sweep_old_events(
+        &self,
+        policy: OldEventPolicy,
+        today: NaiveDate,
+    ) -> anyhow::Result<SweepReport> {
+        let mut report = SweepReport::default();
+        if policy == OldEventPolicy::Nothing {
+            return Ok(report);
+        }
+        let events = self.events_dir();
+        if !events.is_dir() {
+            return Ok(report);
+        }
+        for entry in std::fs::read_dir(&events)
+            .with_context(|| format!("failed to list {}", events.display()))?
+        {
+            let entry = entry?;
+            if !entry.file_type()?.is_file() {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let Some(raw) = name.strip_suffix(".md") else {
+                continue;
+            };
+            let Ok(date) = NaiveDate::parse_from_str(raw, "%Y-%m-%d") else {
+                continue;
+            };
+            if date >= today {
+                continue;
+            }
+            let path = entry.path();
+            match policy {
+                OldEventPolicy::Nothing => {}
+                OldEventPolicy::Delete => {
+                    std::fs::remove_file(&path)
+                        .with_context(|| format!("failed to delete {}", path.display()))?;
+                    report.deleted += 1;
+                }
+                OldEventPolicy::Backlog => {
+                    let dest = self.backlog_dir().join(&name);
+                    if let Some(parent) = dest.parent() {
+                        std::fs::create_dir_all(parent)
+                            .with_context(|| format!("failed to create {}", parent.display()))?;
+                    }
+                    std::fs::rename(&path, &dest).with_context(|| {
+                        format!("failed to move {} to {}", path.display(), dest.display())
+                    })?;
+                    report.backlogged += 1;
+                }
+            }
+        }
+        Ok(report)
     }
 
     #[must_use]
@@ -176,5 +249,95 @@ mod tests {
         store.ensure_layout().unwrap();
         assert!(!legacy.exists());
         assert!(store.day_path(date()).exists());
+    }
+
+    fn sweep_fixture() -> (tempfile::TempDir, Store) {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Store::new(tmp.path().to_path_buf());
+        store.ensure_layout().unwrap();
+        std::fs::write(store.events_dir().join("2026-11-19.md"), "# old\n").unwrap();
+        std::fs::write(store.events_dir().join("2026-11-20.md"), "# today\n").unwrap();
+        std::fs::write(store.events_dir().join("2026-11-21.md"), "# future\n").unwrap();
+        std::fs::write(store.events_dir().join("seen.md"), "# stray\n").unwrap();
+        (tmp, store)
+    }
+
+    #[test]
+    fn sweep_delete_removes_only_past_days() {
+        use crate::config::OldEventPolicy;
+        let (_tmp, store) = sweep_fixture();
+        let today = NaiveDate::from_ymd_opt(2026, 11, 20).unwrap();
+        let report = store
+            .sweep_old_events(OldEventPolicy::Delete, today)
+            .unwrap();
+        assert_eq!(
+            report,
+            SweepReport {
+                deleted: 1,
+                backlogged: 0
+            }
+        );
+        assert!(!store.events_dir().join("2026-11-19.md").exists());
+        assert!(store.events_dir().join("2026-11-20.md").exists());
+        assert!(store.events_dir().join("2026-11-21.md").exists());
+        assert!(store.events_dir().join("seen.md").exists());
+    }
+
+    #[test]
+    fn sweep_backlog_moves_past_days() {
+        use crate::config::OldEventPolicy;
+        let (_tmp, store) = sweep_fixture();
+        let today = NaiveDate::from_ymd_opt(2026, 11, 20).unwrap();
+        let report = store
+            .sweep_old_events(OldEventPolicy::Backlog, today)
+            .unwrap();
+        assert_eq!(
+            report,
+            SweepReport {
+                deleted: 0,
+                backlogged: 1
+            }
+        );
+        assert!(!store.events_dir().join("2026-11-19.md").exists());
+        assert!(store.backlog_dir().join("2026-11-19.md").exists());
+        assert!(store.events_dir().join("2026-11-20.md").exists());
+    }
+
+    #[test]
+    fn sweep_backlog_ignores_previous_backlog() {
+        use crate::config::OldEventPolicy;
+        let (_tmp, store) = sweep_fixture();
+        let today = NaiveDate::from_ymd_opt(2026, 11, 20).unwrap();
+        store
+            .sweep_old_events(OldEventPolicy::Backlog, today)
+            .unwrap();
+        let again = store
+            .sweep_old_events(OldEventPolicy::Backlog, today)
+            .unwrap();
+        assert_eq!(again, SweepReport::default());
+    }
+
+    #[test]
+    fn sweep_nothing_leaves_everything() {
+        use crate::config::OldEventPolicy;
+        let (_tmp, store) = sweep_fixture();
+        let today = NaiveDate::from_ymd_opt(2026, 11, 20).unwrap();
+        let report = store
+            .sweep_old_events(OldEventPolicy::Nothing, today)
+            .unwrap();
+        assert_eq!(report, SweepReport::default());
+        assert!(store.events_dir().join("2026-11-19.md").exists());
+    }
+
+    #[test]
+    fn sweep_without_events_dir_is_noop() {
+        use crate::config::OldEventPolicy;
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Store::new(tmp.path().to_path_buf());
+        let today = NaiveDate::from_ymd_opt(2026, 11, 20).unwrap();
+        let report = store
+            .sweep_old_events(OldEventPolicy::Delete, today)
+            .unwrap();
+        assert_eq!(report, SweepReport::default());
     }
 }

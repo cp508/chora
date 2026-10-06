@@ -10,6 +10,30 @@ pub struct Config {
     pub main: Main,
 }
 
+/// What to do with day files older than today on every event action.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum OldEventPolicy {
+    /// Delete passed day files.
+    Delete,
+    /// Move passed day files to `events/backlog/`.
+    Backlog,
+    /// Leave passed day files alone; the sweep never runs.
+    #[default]
+    Nothing,
+}
+
+impl OldEventPolicy {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Delete => "delete",
+            Self::Backlog => "backlog",
+            Self::Nothing => "nothing",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Main {
     /// `~/` expands to home.
@@ -20,6 +44,9 @@ pub struct Main {
     /// Directory opener. Empty = $EDITOR.
     #[serde(default)]
     pub open_dirs: String,
+    /// Old day files (before today) on every event action.
+    #[serde(default)]
+    pub manage_old_event: OldEventPolicy,
     /// Git remote. Empty = local only.
     #[serde(default)]
     pub remote_url: String,
@@ -31,6 +58,7 @@ impl Default for Main {
             chora_dir: String::from("~/chora"),
             editor: String::new(),
             open_dirs: String::new(),
+            manage_old_event: OldEventPolicy::Nothing,
             remote_url: String::new(),
         }
     }
@@ -50,6 +78,10 @@ fn known_fields() -> Vec<(&'static str, toml::Value)> {
         ("chora_dir", toml::Value::String(defaults.chora_dir)),
         ("editor", toml::Value::String(defaults.editor)),
         ("open_dirs", toml::Value::String(defaults.open_dirs)),
+        (
+            "manage_old_event",
+            toml::Value::String(defaults.manage_old_event.as_str().to_owned()),
+        ),
         ("remote_url", toml::Value::String(defaults.remote_url)),
     ]
 }
@@ -64,6 +96,9 @@ fn field_comment(key: &str) -> Option<&'static str> {
         "open_dirs" => {
             Some("# Opener for directories (notes/, events/). Empty = use $EDITOR. Try \"yazi\".")
         }
+        "manage_old_event" => Some(
+            "# Passed day files (before today) on every event action: delete, backlog (= move to events/backlog/), or nothing.",
+        ),
         "remote_url" => Some("# SSH URL of the git remote. Empty = local-only git."),
         _ => None,
     }
@@ -219,6 +254,7 @@ mod tests {
         assert_eq!(cfg.main.chora_dir, "~/chora");
         assert!(cfg.main.editor.is_empty());
         assert!(cfg.main.open_dirs.is_empty());
+        assert_eq!(cfg.main.manage_old_event, OldEventPolicy::Nothing);
         assert!(cfg.main.remote_url.is_empty());
     }
 
@@ -273,6 +309,39 @@ mod tests {
     }
 
     #[test]
+    fn load_from_parses_old_event_policy() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        for (raw, expected) in [
+            ("delete", OldEventPolicy::Delete),
+            ("backlog", OldEventPolicy::Backlog),
+            ("nothing", OldEventPolicy::Nothing),
+        ] {
+            std::fs::write(
+                &path,
+                format!("[main]\nchora_dir = \"/tmp/c\"\nmanage_old_event = \"{raw}\"\n"),
+            )
+            .unwrap();
+            assert_eq!(
+                Config::load_from(&path).unwrap().main.manage_old_event,
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn load_from_rejects_unknown_old_event_policy() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[main]\nchora_dir = \"/tmp/c\"\nmanage_old_event = \"sometimes\"\n",
+        )
+        .unwrap();
+        assert!(Config::load_from(&path).is_err());
+    }
+
+    #[test]
     fn ensure_creates_defaults_from_scratch() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
@@ -282,6 +351,7 @@ mod tests {
         assert_eq!(cfg.main.chora_dir, "~/chora");
         assert!(cfg.main.editor.is_empty());
         assert!(cfg.main.open_dirs.is_empty());
+        assert_eq!(cfg.main.manage_old_event, OldEventPolicy::Nothing);
         assert!(cfg.main.remote_url.is_empty());
     }
 
@@ -295,12 +365,16 @@ mod tests {
         )
         .unwrap();
         let ensured = Config::ensure_exists_at(&path).unwrap();
-        assert_eq!(ensured.added, vec!["editor", "open_dirs", "remote_url"]);
+        assert_eq!(
+            ensured.added,
+            vec!["editor", "open_dirs", "manage_old_event", "remote_url"]
+        );
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.contains("# my old config"));
         assert!(text.contains("# NEW\n"));
         assert!(text.contains("editor = \"\""));
         assert!(text.contains("open_dirs = \"\""));
+        assert!(text.contains("manage_old_event = \"nothing\""));
         assert!(text.contains("remote_url = \"\""));
         let cfg = Config::load_from(&path).unwrap();
         assert_eq!(cfg.main.chora_dir, "/tmp/keep");
@@ -312,7 +386,7 @@ mod tests {
         let path = dir.path().join("config.toml");
         std::fs::write(
             &path,
-            "[main]\nchora_dir = \"/tmp/c\"\nauto_commit = 5\neditor = \"yazi\"\nopen_dirs = \"yazi\"\nremote_url = \"\"\n",
+            "[main]\nchora_dir = \"/tmp/c\"\nauto_commit = 5\neditor = \"yazi\"\nopen_dirs = \"yazi\"\nmanage_old_event = \"nothing\"\nremote_url = \"\"\n",
         )
         .unwrap();
         let before = std::fs::read_to_string(&path).unwrap();

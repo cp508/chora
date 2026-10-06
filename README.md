@@ -38,6 +38,7 @@ Run `chora` with no arguments to see the full tree.
 chora_dir = "~/chora"
 editor = ""      # opener for files, e.g. "hx". Empty = $EDITOR.
 open_dirs = ""   # opener for dirs, e.g. "yazi", "sh -c 'nvim $(fzf)'". Empty = $EDITOR.
+manage_old_event = "nothing"  # passed day files on event actions: delete, backlog (= move to events/backlog/), nothing.
 remote_url = ""  # SSH remote. Empty = local-only git.
 ```
 

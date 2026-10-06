@@ -3,8 +3,8 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::Context;
-use chora::cli::{Cli, Cmd, OpenTarget, parse_date_arg, render_help_tree};
-use chora::config::Config;
+use chora::cli::{Cli, Cmd, OpenTarget, parse_date_arg, render_help_tree, today};
+use chora::config::{Config, OldEventPolicy};
 use chora::error::ChoraError;
 use chora::store::Store;
 use chora::{editor, event, git, output, tui};
@@ -29,6 +29,9 @@ fn main() -> anyhow::Result<()> {
             };
             // cwd = target: `sh -c '... $(fzf)'` openers scan cwd and ignore
             // the target arg (it lands in $0), so root would show both dirs.
+            if matches!(target, OpenTarget::Events) {
+                sweep_old_events(&store, &cfg)?;
+            }
             editor::open(&dir, &dir, dirs_opener(&cfg))?;
             sync_in_background(&store, cli.dir.as_deref(), &format!("open: {name}"))
         }
@@ -43,8 +46,8 @@ fn main() -> anyhow::Result<()> {
             match (date, use_tui) {
                 (Some(_), true) => Err(ChoraError::EventExclusiveTarget.into()),
                 (None, false) => Err(ChoraError::EventNeedsTarget.into()),
-                (Some(raw), false) => cmd_event_stub(&store, &raw, open),
-                (None, true) => cmd_event_tui(&store, confirm, open),
+                (Some(raw), false) => cmd_event_stub(&store, &cfg, &raw, open),
+                (None, true) => cmd_event_tui(&store, &cfg, confirm, open),
             }
         }
         Cmd::Show { date, json } => {
@@ -113,6 +116,23 @@ fn commit_and_push(store: &Store, message: &str) -> anyhow::Result<()> {
         }
         Ok(())
     })
+}
+
+/// Apply `manage_old_event` to passed day files. `Nothing` skips the scan
+/// entirely; otherwise the sweep rides along with the action's own commit.
+fn sweep_old_events(store: &Store, cfg: &Config) -> anyhow::Result<()> {
+    let policy = cfg.main.manage_old_event;
+    if policy == OldEventPolicy::Nothing {
+        return Ok(());
+    }
+    let report = store.sweep_old_events(policy, today())?;
+    if report.deleted > 0 {
+        println!("old events: deleted {}", report.deleted);
+    }
+    if report.backlogged > 0 {
+        println!("old events: moved {} to backlog", report.backlogged);
+    }
+    Ok(())
 }
 
 /// Detach the commit+push after `open`: the editor is closed, the shell is
@@ -214,15 +234,26 @@ fn cmd_init() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn cmd_event_stub(store: &Store, raw: &str, open: Option<&str>) -> anyhow::Result<()> {
+fn cmd_event_stub(
+    store: &Store,
+    cfg: &Config,
+    raw: &str,
+    open: Option<&str>,
+) -> anyhow::Result<()> {
     let day = parse_date_arg(raw)?;
+    sweep_old_events(store, cfg)?;
     let path = store.ensure_day_file(day)?;
     store.append_section(day, "## \nTime: \nDuration: \n")?;
     editor::open(&path, store.root(), open)?;
     commit_and_push(store, &format!("event: {}", day.format("%Y-%m-%d")))
 }
 
-fn cmd_event_tui(store: &Store, confirm: bool, open: Option<&str>) -> anyhow::Result<()> {
+fn cmd_event_tui(
+    store: &Store,
+    cfg: &Config,
+    confirm: bool,
+    open: Option<&str>,
+) -> anyhow::Result<()> {
     let data = match tui::run()? {
         tui::TuiOutcome::Cancelled => return Ok(()),
         tui::TuiOutcome::Submitted(data) => data,
@@ -238,6 +269,7 @@ fn cmd_event_tui(store: &Store, confirm: bool, open: Option<&str>) -> anyhow::Re
     });
     store.append_section(data.date, &rendered)?;
     let message = format!("event: {} {}", data.date.format("%Y-%m-%d"), data.title);
+    sweep_old_events(store, cfg)?;
     commit_and_push(store, &message)?;
     if confirm {
         let path = store.ensure_day_file(data.date)?;

@@ -335,6 +335,7 @@ fn init_migrates_old_config_with_new_marker() {
     assert!(text.contains("# NEW\n"));
     assert!(text.contains("editor = \"\""));
     assert!(text.contains("open_dirs = \"\""));
+    assert!(text.contains("manage_old_event = \"nothing\""));
     assert!(text.contains("remote_url = \"\""));
 
     // Second init stays quiet.
@@ -470,6 +471,40 @@ fn open_runs_dirs_opener_inside_target_dir() {
         root.join("notes"),
         "dirs-opener cwd must be the target dir"
     );
+}
+
+#[test]
+fn event_sweeps_old_days_per_policy() {
+    let env = setup();
+    assert!(cmd(&env).arg("init").output().unwrap().status.success());
+
+    let cfg = env.home.join(".config").join("chora").join("config.toml");
+    let text = "[main]\nchora_dir = \"~/chora\"\neditor = \"\"\nopen_dirs = \"\"\nmanage_old_event = \"delete\"\nremote_url = \"\"\n";
+    std::fs::write(&cfg, text).unwrap();
+
+    let editor = editor_script(&env, "noop.sh", "#!/bin/sh\nexit 0\n");
+    let root = storage(&env);
+    std::fs::create_dir_all(root.join("events")).unwrap();
+    std::fs::write(root.join("events").join("2020-01-01.md"), "# 2020-01-01\n").unwrap();
+
+    let out = cmd(&env)
+        .env("EDITOR", &editor)
+        .args([
+            "--dir",
+            &root.to_string_lossy(),
+            "event",
+            "--date",
+            "2099-01-01",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!root.join("events").join("2020-01-01.md").exists());
+    assert!(root.join("events").join("2099-01-01.md").exists());
 }
 
 #[test]
