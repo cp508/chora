@@ -20,6 +20,15 @@ pub enum ChoraError {
     #[error("git: {0}")]
     Git(String),
 
+    #[error("remote unreachable: {0}")]
+    GitOffline(String),
+
+    #[error("remote auth failed: {0}")]
+    GitAuth(String),
+
+    #[error("remote diverged, resolve it inside the storage dir: {0}")]
+    GitDiverged(String),
+
     #[error("empty $EDITOR: set an editor, e.g. EDITOR=\"hx .\"")]
     EditorMissing,
 

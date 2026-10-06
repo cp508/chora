@@ -7,7 +7,7 @@ use chora::cli::{Cli, Cmd, OpenTarget, parse_date_arg, render_help_tree, today};
 use chora::config::{Config, OldEventPolicy};
 use chora::error::ChoraError;
 use chora::store::Store;
-use chora::{editor, event, git, output, tui};
+use chora::{editor, event, git, output, sync, tui};
 use clap::Parser;
 
 fn main() -> anyhow::Result<()> {
@@ -68,7 +68,12 @@ fn main() -> anyhow::Result<()> {
         Cmd::SyncAfterOpen { message } => {
             let (_cfg, store) = load_store(cli.dir.as_deref(), true)?;
             require_repo(&store)?;
-            pull_rebase_push(&store, &message)
+            // Timestamp header: the log is append-only, runs must delimit.
+            eprintln!(
+                "--- sync-after-open {} ---",
+                chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
+            );
+            sync::sync_after_open(&store, &message)
         }
     }
 }
@@ -115,40 +120,6 @@ fn require_repo(store: &Store) -> anyhow::Result<()> {
     }
 }
 
-fn commit_and_push(store: &Store, message: &str) -> anyhow::Result<()> {
-    with_sync_lock(store.root(), || {
-        git::add_all(store.root())?;
-        if git::commit(store.root(), message)? {
-            git::push(store.root())?;
-        }
-        Ok(())
-    })
-}
-
-/// Pull remote changes before editing. Fails loudly on diverged history
-/// or unreachable remote — never edit on a stale base silently.
-fn pull_before_edit(store: &Store) -> anyhow::Result<()> {
-    with_sync_lock(store.root(), || git::pull(store.root()))
-}
-
-/// Background tail of `open` (detached via `setsid`, failures go to
-/// `sync.log`): commit the exit state, merge remote work underneath it,
-/// then push. The editor is already closed, so the shell was never blocked.
-fn pull_rebase_push(store: &Store, message: &str) -> anyhow::Result<()> {
-    with_sync_lock(store.root(), || {
-        git::add_all(store.root())?;
-        let _ = git::commit(store.root(), message)?;
-        // First push ever has no upstream yet — `push` below sets it via
-        // `-u`; there is nothing to merge onto. Afterwards the branch
-        // tracks the remote, so rebase the exit commit onto fresh work.
-        if git::has_remote(store.root()) && git::has_upstream(store.root()) {
-            git::pull_rebase(store.root())?;
-        }
-        git::push(store.root())?;
-        Ok(())
-    })
-}
-
 /// Apply `manage_old_event` to passed day files. `Nothing` skips the scan
 /// entirely; otherwise the sweep rides along with the action's own commit.
 fn sweep_old_events(store: &Store, cfg: &Config) -> anyhow::Result<()> {
@@ -192,7 +163,7 @@ fn sync_in_background(store: &Store, dir: Option<&Path>, message: &str) -> anyho
         }
         Err(err) => {
             chora::debug_log!("background sync spawn failed ({err}); syncing in foreground");
-            commit_and_push(store, message)
+            sync::sync_after_open(store, message)
         }
     }
 }
@@ -231,25 +202,6 @@ fn sync_log_path() -> anyhow::Result<PathBuf> {
     Ok(data.join("chora").join("sync.log"))
 }
 
-/// Serialize add/commit/push across concurrent chora processes.
-/// Directory creation is atomic; a stale lock (killed process) times out
-/// instead of blocking forever.
-fn with_sync_lock(root: &Path, sync: impl FnOnce() -> anyhow::Result<()>) -> anyhow::Result<()> {
-    let lock = root.join(".git").join("chora-sync.lock");
-    let mut waited = 0;
-    while std::fs::create_dir(&lock).is_err() {
-        if waited >= 60 {
-            chora::warn_log!("sync lock is stale, proceeding anyway");
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_secs(1));
-        waited += 1;
-    }
-    let result = sync();
-    let _ = std::fs::remove_dir(&lock);
-    result
-}
-
 /// No flags: everything comes from the config file.
 /// Creates the config only; the storage appears on first use.
 fn cmd_init() -> anyhow::Result<()> {
@@ -272,12 +224,12 @@ fn cmd_event_stub(
     open: Option<&str>,
 ) -> anyhow::Result<()> {
     let day = parse_date_arg(raw)?;
-    pull_before_edit(store)?;
+    sync::pull_before_edit(store)?;
     sweep_old_events(store, cfg)?;
     let path = store.ensure_day_file(day)?;
     store.append_section(day, "## \nTime: \nDuration: \n")?;
     editor::open(&path, store.root(), open)?;
-    commit_and_push(store, &format!("event: {}", day.format("%Y-%m-%d")))
+    sync::commit_and_push(store, &format!("event: {}", day.format("%Y-%m-%d")))
 }
 
 fn cmd_event_tui(
@@ -300,15 +252,15 @@ fn cmd_event_tui(
         context: data.context.clone(),
     });
     // Pull after the form, right before the write: the freshest base wins.
-    pull_before_edit(store)?;
+    sync::pull_before_edit(store)?;
     store.append_section(data.date, &rendered)?;
     let message = format!("event: {} {}", data.date.format("%Y-%m-%d"), data.title);
     sweep_old_events(store, cfg)?;
-    commit_and_push(store, &message)?;
+    sync::commit_and_push(store, &message)?;
     if confirm {
         let path = store.ensure_day_file(data.date)?;
         editor::open(&path, store.root(), open)?;
-        commit_and_push(store, &message)?;
+        sync::commit_and_push(store, &message)?;
     }
     Ok(())
 }

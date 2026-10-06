@@ -22,7 +22,7 @@ Edit the config, then run any command — the storage appears on first use.
 Run `chora` with no arguments to see the full tree.
 
 - `init` — bootstrap the config. No flags.
-- `open <notes|events>` — open a dir once, commit on exit.
+- `open <notes|events>` — open a dir once, pull + commit + push in background on exit.
 - `event --date <DATE>` — append an event stub, open the day file.
 - `event --tui [--confirm]` — TUI form for creating an event.
 - `show --date <DATE> [--json]` — show the events of a day.

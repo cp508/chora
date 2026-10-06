@@ -9,4 +9,5 @@ pub mod git;
 pub mod log;
 pub mod output;
 pub mod store;
+pub mod sync;
 pub mod tui;

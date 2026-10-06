@@ -11,6 +11,8 @@ fn git(dir: &Path, args: &[&str]) -> anyhow::Result<Output> {
         .arg("-C")
         .arg(dir)
         .args(args)
+        // English diagnostics: `classify` matches on message text.
+        .env("LC_ALL", "C")
         .output()
         .map_err(|err| {
             if err.kind() == std::io::ErrorKind::NotFound {
@@ -24,6 +26,80 @@ fn git(dir: &Path, args: &[&str]) -> anyhow::Result<Output> {
 
 fn stderr_of(out: &Output) -> String {
     String::from_utf8_lossy(&out.stderr).trim().to_owned()
+}
+
+/// Why a remote operation failed. Matched on English (`LC_ALL=C`) stderr.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Failure {
+    Offline,
+    Auth,
+    Diverged,
+    Other,
+}
+
+fn classify(stderr: &str) -> Failure {
+    let text = stderr.to_lowercase();
+    let contains_any = |needles: &[&str]| needles.iter().any(|needle| text.contains(needle));
+    if contains_any(&[
+        "could not resolve host",
+        "temporary failure in name resolution",
+        "network is unreachable",
+        "no route to host",
+        "connection refused",
+        "connection timed out",
+        "timed out",
+        "unable to connect",
+        "failed to connect",
+    ]) {
+        Failure::Offline
+    } else if contains_any(&[
+        "permission denied",
+        "authentication failed",
+        "invalid username",
+        "could not read username",
+        "terminal prompts disabled",
+        "access denied",
+        "401",
+        "403",
+    ]) {
+        Failure::Auth
+    } else if contains_any(&[
+        "fast-forward",
+        "[rejected]",
+        "fetch first",
+        "no tracking information",
+        "no upstream",
+        "divergent",
+        "diverging",
+        "unrelated histories",
+        "need to merge",
+        "would be overwritten",
+        "conflict",
+    ]) {
+        Failure::Diverged
+    } else {
+        Failure::Other
+    }
+}
+
+/// Network-side failure with a classified message for remote operations.
+fn remote_err(stderr: String) -> anyhow::Error {
+    match classify(&stderr) {
+        Failure::Offline => ChoraError::GitOffline(stderr).into(),
+        Failure::Auth => ChoraError::GitAuth(stderr).into(),
+        Failure::Diverged => ChoraError::GitDiverged(stderr).into(),
+        Failure::Other => ChoraError::Git(stderr).into(),
+    }
+}
+
+/// Offline/auth failures: safe to keep working locally, the later push
+/// reports them again loudly. Anything else fails fast.
+#[must_use]
+pub fn is_transient(err: &anyhow::Error) -> bool {
+    matches!(
+        err.downcast_ref::<ChoraError>(),
+        Some(ChoraError::GitOffline(_) | ChoraError::GitAuth(_))
+    )
 }
 
 #[must_use]
@@ -63,17 +139,19 @@ pub fn has_upstream(dir: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// Pull remote changes before editing. No remote or no local commits = no-op.
-/// `--ff-only` never creates merge commits: diverged histories fail loudly.
+/// Pull remote changes before editing. No remote or no upstream = no-op:
+/// without tracking there is nothing to merge onto — the later `push -u`
+/// establishes it. `--ff-only` never creates merge commits: diverged
+/// histories fail loudly.
 pub fn pull(dir: &Path) -> anyhow::Result<()> {
-    if !has_remote(dir) || !has_head(dir) {
+    if !has_remote(dir) || !has_upstream(dir) {
         return Ok(());
     }
     let out = git(dir, &["pull", "--ff-only", "-q"])?;
     if out.status.success() {
         Ok(())
     } else {
-        Err(ChoraError::Git(stderr_of(&out)).into())
+        Err(remote_err(stderr_of(&out)))
     }
 }
 
@@ -86,7 +164,7 @@ pub fn pull_rebase(dir: &Path) -> anyhow::Result<()> {
     if out.status.success() {
         Ok(())
     } else {
-        Err(ChoraError::Git(stderr_of(&out)).into())
+        Err(remote_err(stderr_of(&out)))
     }
 }
 
@@ -100,7 +178,7 @@ pub fn ensure_from_remote(dir: &Path) -> anyhow::Result<()> {
     }
     let fetch = git(dir, &["fetch", "origin"])?;
     if !fetch.status.success() {
-        return Err(ChoraError::Git(stderr_of(&fetch)).into());
+        return Err(remote_err(stderr_of(&fetch)));
     }
     let Some(branch) = default_remote_branch(dir)? else {
         return Ok(());
@@ -205,6 +283,73 @@ pub fn push(dir: &Path) -> anyhow::Result<()> {
     if upstream.status.success() {
         Ok(())
     } else {
-        Err(ChoraError::Git(stderr_of(&upstream)).into())
+        Err(remote_err(stderr_of(&upstream)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn classify_spots_offline() {
+        for stderr in [
+            "ssh: Could not resolve hostname gitlab.com: Temporary failure in name resolution",
+            "fatal: unable to connect to github.com: Connection timed out",
+            "fatal: Network is unreachable",
+        ] {
+            assert_eq!(classify(stderr), Failure::Offline, "{stderr}");
+        }
+    }
+
+    #[test]
+    fn classify_spots_auth() {
+        for stderr in [
+            "git@gitlab.com: Permission denied (publickey).",
+            "fatal: Authentication failed for 'https://gitlab.com/x.git/'",
+            "remote: HTTP Basic: Access denied",
+        ] {
+            assert_eq!(classify(stderr), Failure::Auth, "{stderr}");
+        }
+    }
+
+    #[test]
+    fn classify_spots_diverged() {
+        for stderr in [
+            " ! [rejected] HEAD -> main (fetch first)",
+            "There is no tracking information for the current branch.",
+            "hint: Diverging branches can't be fast-forwarded",
+            "fatal: Not possible to fast-forward, aborting.",
+            "fatal: Need to specify how to reconcile divergent branches.",
+            "error: Your local changes would be overwritten by merge.",
+            "CONFLICT (content): Merge conflict in events/2026-11-20.md",
+        ] {
+            assert_eq!(classify(stderr), Failure::Diverged, "{stderr}");
+        }
+    }
+
+    #[test]
+    fn classify_leaves_misconfiguration_other() {
+        assert_eq!(
+            classify("'/tmp/x/remote.git' does not appear to be a git repository"),
+            Failure::Other
+        );
+    }
+
+    #[test]
+    fn transient_covers_offline_and_auth_only() {
+        for err in [
+            remote_err(String::from("Could not resolve hostname x")),
+            remote_err(String::from("Permission denied (publickey)")),
+        ] {
+            assert!(is_transient(&err));
+        }
+        for err in [
+            remote_err(String::from(" ! [rejected] HEAD -> main (fetch first)")),
+            remote_err(String::from("some other failure")),
+            anyhow::anyhow!("boom"),
+        ] {
+            assert!(!is_transient(&err));
+        }
     }
 }

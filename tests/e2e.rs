@@ -22,16 +22,25 @@ fn setup() -> Env {
     Env { _tmp: tmp, home }
 }
 
+/// Isolated HOME plus a pinned default branch, so bare remotes, clones
+/// and fresh repos always agree on `main` regardless of host git config.
+fn git_env(cmd: &mut Command, env: &Env) {
+    cmd.env("HOME", &env.home);
+    cmd.env_remove("XDG_CONFIG_HOME");
+    cmd.env("GIT_CONFIG_NOSYSTEM", "1");
+    cmd.env("GIT_CONFIG_COUNT", "1");
+    cmd.env("GIT_CONFIG_KEY_0", "init.defaultBranch");
+    cmd.env("GIT_CONFIG_VALUE_0", "main");
+}
+
 /// Base command: isolated HOME, no XDG leakage, deterministic git identity.
 fn cmd(env: &Env) -> Command {
     let mut cmd = Command::new(bin());
-    cmd.env("HOME", &env.home);
-    cmd.env_remove("XDG_CONFIG_HOME");
+    git_env(&mut cmd, env);
     cmd.env("GIT_AUTHOR_NAME", "tester");
     cmd.env("GIT_AUTHOR_EMAIL", "tester@example.com");
     cmd.env("GIT_COMMITTER_NAME", "tester");
     cmd.env("GIT_COMMITTER_EMAIL", "tester@example.com");
-    cmd.env("GIT_CONFIG_NOSYSTEM", "1");
     cmd
 }
 
@@ -523,17 +532,16 @@ fn open_rejects_unknown_target() {
 /// `git` with deterministic identity in the isolated HOME, so branch
 /// defaults match the ones chora itself sees under `cmd`.
 fn git_ok(env: &Env, dir: &Path, args: &[&str]) {
-    let out = Command::new("git")
+    let mut cmd = Command::new("git");
+    git_env(&mut cmd, env);
+    let out = cmd
         .arg("-C")
         .arg(dir)
         .args(args)
-        .env("HOME", &env.home)
-        .env_remove("XDG_CONFIG_HOME")
         .env("GIT_AUTHOR_NAME", "tester")
         .env("GIT_AUTHOR_EMAIL", "tester@example.com")
         .env("GIT_COMMITTER_NAME", "tester")
         .env("GIT_COMMITTER_EMAIL", "tester@example.com")
-        .env("GIT_CONFIG_NOSYSTEM", "1")
         .output()
         .unwrap();
     assert!(
@@ -547,12 +555,11 @@ fn git_ok(env: &Env, dir: &Path, args: &[&str]) {
 /// Bare remote inside the isolated HOME: same branch defaults as chora.
 fn init_bare_remote(env: &Env, name: &str) -> PathBuf {
     let remote = env.home.join(name);
-    let out = Command::new("git")
+    let mut cmd = Command::new("git");
+    git_env(&mut cmd, env);
+    let out = cmd
         .args(["init", "--bare", "-q"])
         .arg(&remote)
-        .env("HOME", &env.home)
-        .env_remove("XDG_CONFIG_HOME")
-        .env("GIT_CONFIG_NOSYSTEM", "1")
         .output()
         .unwrap();
     assert!(out.status.success());
@@ -560,13 +567,12 @@ fn init_bare_remote(env: &Env, name: &str) -> PathBuf {
 }
 
 fn clone_remote(env: &Env, remote: &Path, dest: &Path) {
-    let out = Command::new("git")
+    let mut cmd = Command::new("git");
+    git_env(&mut cmd, env);
+    let out = cmd
         .args(["clone", "-q"])
         .arg(remote)
         .arg(dest)
-        .env("HOME", &env.home)
-        .env_remove("XDG_CONFIG_HOME")
-        .env("GIT_CONFIG_NOSYSTEM", "1")
         .output()
         .unwrap();
     assert!(
@@ -710,6 +716,248 @@ fn open_pulls_remote_in_background_on_exit() {
     poll_file(&root.join("notes").join("from-remote.md"));
     assert!(root.join("notes").join("local2.md").exists());
     poll_log(&root, "open: notes");
+}
+
+#[test]
+fn first_push_sets_upstream() {
+    let env = setup();
+    assert!(cmd(&env).arg("init").output().unwrap().status.success());
+
+    let remote = init_bare_remote(&env, "remote.git");
+    write_config_with_remote(&env, &remote);
+
+    let editor = editor_script(&env, "noop.sh", "#!/bin/sh\nexit 0\n");
+    let root = storage(&env);
+    let out = cmd(&env)
+        .env("EDITOR", &editor)
+        .args([
+            "--dir",
+            &root.to_string_lossy(),
+            "event",
+            "--date",
+            "2026-11-20",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // The first push establishes tracking: plain `git pull` works from here.
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(&root)
+        .args(["rev-parse", "--verify", "@{u}"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "no upstream after first push: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn event_without_upstream_skips_pull_and_fails_loud_at_push() {
+    let env = setup();
+    assert!(cmd(&env).arg("init").output().unwrap().status.success());
+
+    // Remote with independent history.
+    let remote = init_bare_remote(&env, "remote.git");
+    let seed = env.home.join("seed");
+    clone_remote(&env, &remote, &seed);
+    std::fs::create_dir_all(seed.join("notes")).unwrap();
+    std::fs::write(seed.join("notes").join("seed.md"), "# seed\n").unwrap();
+    git_ok(&env, &seed, &["add", "-A"]);
+    git_ok(&env, &seed, &["commit", "-qm", "seed"]);
+    git_ok(&env, &seed, &["push", "-q", "-u", "origin", "HEAD"]);
+
+    // Local repo with its own root commit, remote attached, no tracking:
+    // e.g. the very first push never went out (was offline).
+    let root = storage(&env);
+    std::fs::create_dir_all(&root).unwrap();
+    let mut init = Command::new("git");
+    git_env(&mut init, &env);
+    let out = init
+        .arg("-C")
+        .arg(&root)
+        .args(["init", "-q"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    std::fs::create_dir_all(root.join("notes")).unwrap();
+    std::fs::write(root.join("notes").join("mine.md"), "# mine\n").unwrap();
+    git_ok(&env, &root, &["add", "-A"]);
+    git_ok(&env, &root, &["commit", "-qm", "mine"]);
+    git_ok(
+        &env,
+        &root,
+        &["remote", "add", "origin", &remote.to_string_lossy()],
+    );
+    write_config_with_remote(&env, &remote);
+
+    // Must not stick at pull with "no tracking information": the pull is
+    // skipped, the edit is committed, and the diverged push fails loudly.
+    let editor = editor_script(&env, "noop.sh", "#!/bin/sh\nexit 0\n");
+    let out = cmd(&env)
+        .env("EDITOR", &editor)
+        .args([
+            "--dir",
+            &root.to_string_lossy(),
+            "event",
+            "--date",
+            "2026-11-20",
+        ])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(
+        !String::from_utf8_lossy(&out.stderr).contains("no tracking information"),
+        "stuck at pull instead of push: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        git_log(&root)
+            .lines()
+            .any(|line| line.starts_with("event:")),
+        "local edit must be committed even when push fails"
+    );
+}
+
+#[test]
+fn event_refuses_diverged_day_loudly() {
+    let env = setup();
+    assert!(cmd(&env).arg("init").output().unwrap().status.success());
+
+    let remote = init_bare_remote(&env, "remote.git");
+    write_config_with_remote(&env, &remote);
+
+    // Shared base.
+    let editor = editor_script(&env, "noop.sh", "#!/bin/sh\nexit 0\n");
+    let root = storage(&env);
+    let out = cmd(&env)
+        .env("EDITOR", &editor)
+        .args([
+            "--dir",
+            &root.to_string_lossy(),
+            "event",
+            "--date",
+            "2026-11-20",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // Another device rewrites the same day file and pushes.
+    let other = env.home.join("other");
+    clone_remote(&env, &remote, &other);
+    let day = other.join("events").join("2026-11-20.md");
+    let mut text = std::fs::read_to_string(&day).unwrap();
+    text.push_str("\n## Remote\nTime: 12:00\nDuration: 1h\n");
+    std::fs::write(&day, text).unwrap();
+    git_ok(&env, &other, &["add", "-A"]);
+    git_ok(&env, &other, &["commit", "-qm", "remote edit"]);
+    git_ok(&env, &other, &["push", "-q"]);
+
+    // Meanwhile this device commits something else without pushing
+    // (e.g. it was offline): histories genuinely diverge now.
+    std::fs::write(root.join("notes").join("local.md"), "# local\n").unwrap();
+    git_ok(&env, &root, &["add", "-A"]);
+    git_ok(&env, &root, &["commit", "-qm", "local offline work"]);
+
+    // Local base is stale: refuse before touching the file, loudly.
+    let out = cmd(&env)
+        .env("EDITOR", &editor)
+        .args([
+            "--dir",
+            &root.to_string_lossy(),
+            "event",
+            "--date",
+            "2026-11-20",
+        ])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("diverged"),
+        "must name the divergence: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let local = std::fs::read_to_string(root.join("events").join("2026-11-20.md")).unwrap();
+    assert!(
+        !local.contains("## Remote"),
+        "stale base must never be edited over"
+    );
+}
+
+#[test]
+fn event_fails_fast_on_bad_remote() {
+    let env = setup();
+    assert!(cmd(&env).arg("init").output().unwrap().status.success());
+
+    let remote = env.home.join("nope.git");
+    write_config_with_remote(&env, &remote);
+
+    let editor = editor_script(&env, "noop.sh", "#!/bin/sh\nexit 0\n");
+    let root = storage(&env);
+    let out = cmd(&env)
+        .env("EDITOR", &editor)
+        .args([
+            "--dir",
+            &root.to_string_lossy(),
+            "event",
+            "--date",
+            "2026-11-20",
+        ])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("git repository"),
+        "misconfiguration must fail fast: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // Nothing half-created: the day file never appears.
+    assert!(!root.join("events").join("2026-11-20.md").exists());
+}
+
+#[test]
+fn open_without_changes_is_quiet() {
+    let env = setup();
+    assert!(cmd(&env).arg("init").output().unwrap().status.success());
+
+    // No remote at all: pure local run.
+    let editor = editor_script(&env, "empty.sh", "#!/bin/sh\nexit 0\n");
+    let root = storage(&env);
+    let out = cmd(&env)
+        .env("EDITOR", &editor)
+        .env_remove("XDG_DATA_HOME")
+        .args(["--dir", &root.to_string_lossy(), "open", "notes"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    poll_log(&root, "open: notes");
+    let log = env
+        .home
+        .join(".local")
+        .join("share")
+        .join("chora")
+        .join("sync.log");
+    let text = std::fs::read_to_string(&log).unwrap_or_default();
+    assert!(
+        !text.contains("Error"),
+        "browse-only run must sync cleanly: {text}"
+    );
 }
 
 #[test]

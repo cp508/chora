@@ -13,7 +13,7 @@ use crate::error::ChoraError;
 /// Full command tree, printed for bare `chora`.
 pub const HELP_TREE: &str = r#"Commands:
   init           Bootstrap the config. Storage appears on first use.
-  open           Open a storage dir once in the dirs-opener, commit on exit.
+   open           Open a storage dir once, sync on exit.
     <notes|events>
                  which directory to open
   event          Day events.
