@@ -1,8 +1,10 @@
 //! `event --tui`: a minimal event-creation form (ratatui + crossterm).
 //!
 //! Five fields: `title`, `date`, `time`, `duration`,
-//! `context`. `time` is prefilled with now and accepts `HH:MM`, `HHMM`,
-//! `H`, `now`, `+30` (minutes from now).
+//! `context`. `date` must be today or later and well-formed: otherwise
+//! a random confused ASCII face pops up above the field and its frame
+//! turns red, live while typing and sticky on submit. No emoji.
+//! `time` accepts only `HH:MM` (prefilled with now).
 //! `Enter` submits from anywhere (so `context` is single-line input with
 //! visual wrapping), `Esc` cancels without writing anything.
 
@@ -17,7 +19,7 @@ use crossterm::{
 use ratatui::{
     Terminal,
     backend::CrosstermBackend,
-    layout::{Constraint, Direction, Layout, Rect},
+    layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Style},
     text::Line,
     widgets::{Block, Borders, Paragraph},
@@ -102,6 +104,38 @@ fn now_time() -> NaiveTime {
     chrono::Local::now().time()
 }
 
+/// Strict `HH:MM` for the TUI time field. No smart formats (`930`, `now`, `+30`).
+fn strict_time(raw: &str) -> Result<NaiveTime, chrono::ParseError> {
+    NaiveTime::parse_from_str(raw.trim(), "%H:%M")
+}
+
+/// Confused ASCII faces (asciiart.eu, one-line faces): one pops up above
+/// the date field when the date is past or malformed.
+const DATE_FACES: [&str; 3] = ["<'(o.o)'>", "`o._.o'", "@(o),(o)"];
+
+/// A random face from the set above. Time-seeded: no `rand` dependency
+/// for a shrug.
+fn random_face() -> &'static str {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|span| span.subsec_nanos())
+        .unwrap_or(0);
+    DATE_FACES[nanos as usize % DATE_FACES.len()]
+}
+
+/// Live date complaint: past dates and malformed buffers alike.
+/// `None` means the date field is fine (for now).
+fn live_date_error(buf: &str) -> Option<String> {
+    match NaiveDate::parse_from_str(buf.trim(), "%Y-%m-%d") {
+        Err(_) => Some(String::from("bad date: expected YYYY-MM-DD")),
+        Ok(date) if date < today() => Some(format!(
+            "date is in the past: {} is before today",
+            date.format("%Y-%m-%d")
+        )),
+        Ok(_) => None,
+    }
+}
+
 impl App {
     fn new() -> Self {
         Self {
@@ -154,7 +188,7 @@ impl App {
         {
             Some(next) => {
                 self.date_buf = next.format("%Y-%m-%d").to_string();
-                self.error = None;
+                self.error = live_date_error(&self.date_buf);
             }
             None => self.error = Some(String::from("bad date: expected YYYY-MM-DD")),
         }
@@ -169,6 +203,13 @@ impl App {
         self.cursor = self.buf().chars().count();
     }
 
+    /// Re-show (or clear) the date complaint while typing in the date field.
+    fn refresh_date_error(&mut self) {
+        if self.focus == Field::Date {
+            self.error = live_date_error(self.buf());
+        }
+    }
+
     fn insert(&mut self, ch: char) {
         let byte: usize = self
             .buf()
@@ -179,6 +220,7 @@ impl App {
         self.buf_mut().insert(byte, ch);
         self.cursor += 1;
         self.error = None;
+        self.refresh_date_error();
     }
 
     fn delete_before(&mut self) {
@@ -194,6 +236,7 @@ impl App {
             .sum();
         self.buf_mut().remove(byte);
         self.error = None;
+        self.refresh_date_error();
     }
 
     fn move_cursor(&mut self, delta: isize) {
@@ -260,12 +303,12 @@ impl App {
             self.error = Some(String::from("title is empty"));
             return;
         }
-        if NaiveDate::parse_from_str(self.date_buf.trim(), "%Y-%m-%d").is_err() {
-            self.error = Some(String::from("bad date: expected YYYY-MM-DD"));
+        if let Some(complaint) = live_date_error(&self.date_buf) {
+            self.error = Some(complaint);
             return;
         }
-        if parse_time_entry(&self.time_buf, now_time()).is_err() {
-            self.error = Some(String::from("bad time: expected HH:MM, 1430, 9, now, +30"));
+        if strict_time(&self.time_buf).is_err() {
+            self.error = Some(String::from("bad time: expected HH:MM"));
             return;
         }
         if parse_duration(&self.duration).is_err() {
@@ -288,7 +331,7 @@ impl App {
         Some(TuiData {
             title: self.title.trim().to_owned(),
             date: NaiveDate::parse_from_str(self.date_buf.trim(), "%Y-%m-%d").ok()?,
-            time: parse_time_entry(self.time_buf.trim(), now_time()).ok()?,
+            time: strict_time(&self.time_buf).ok()?,
             duration_raw: self.duration.trim().to_owned(),
             context: self.context.trim().to_owned(),
         })
@@ -348,58 +391,85 @@ fn event_loop(
 
 fn render(frame: &mut ratatui::Frame<'_>, app: &App) {
     let popup = centered(frame.area(), 64, 24);
+    // Live state, not only submit errors: the complaint shows before Enter,
+    // while any other field is being fixed.
+    let live = live_date_error(&app.date_buf);
+    let mut constraints = vec![Constraint::Length(3)];
+    if live.is_some() {
+        constraints.push(Constraint::Length(1));
+    }
+    constraints.extend([
+        Constraint::Length(3),
+        Constraint::Length(3),
+        Constraint::Length(3),
+        Constraint::Length(7),
+        Constraint::Min(4),
+    ]);
     let rows = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3),
-            Constraint::Length(3),
-            Constraint::Length(3),
-            Constraint::Length(3),
-            Constraint::Length(7),
-            Constraint::Min(4),
-        ])
+        .constraints(constraints)
         .split(popup);
+    let mut idx = 0;
     render_input(
         frame,
-        rows[0],
+        rows[idx],
         "title",
         app.focus == Field::Title,
         &app.title,
         field_cursor(app, Field::Title),
+        false,
     );
+    idx += 1;
+    if live.is_some() {
+        frame.render_widget(
+            Paragraph::new(random_face())
+                .style(Style::default().fg(Color::Red))
+                .alignment(Alignment::Center),
+            rows[idx],
+        );
+        idx += 1;
+    }
     render_input(
         frame,
-        rows[1],
+        rows[idx],
         "date (YYYY-MM-DD)",
         app.focus == Field::Date,
         &app.date_buf,
         field_cursor(app, Field::Date),
+        live.is_some(),
     );
+    idx += 1;
     render_input(
         frame,
-        rows[2],
+        rows[idx],
         "time (HH:MM)",
         app.focus == Field::Time,
         &app.time_buf,
         field_cursor(app, Field::Time),
+        false,
     );
+    idx += 1;
     render_input(
         frame,
-        rows[3],
+        rows[idx],
         "duration (45m, 2h, 1h30m)",
         app.focus == Field::Duration,
         &app.duration,
         field_cursor(app, Field::Duration),
+        false,
     );
+    idx += 1;
     render_input(
         frame,
-        rows[4],
+        rows[idx],
         "context",
         app.focus == Field::Context,
         &app.context,
         field_cursor(app, Field::Context),
+        false,
     );
-    render_footer(frame, rows[5], app.error.as_deref());
+    idx += 1;
+    render_footer(frame, rows[idx], app.error.as_deref().or(live.as_deref()));
 }
 
 fn field_cursor(app: &App, field: Field) -> Option<usize> {
@@ -426,8 +496,11 @@ fn render_input(
     focused: bool,
     text: &str,
     cursor: Option<usize>,
+    invalid: bool,
 ) {
-    let border = if focused {
+    let border = if invalid {
+        Color::Red
+    } else if focused {
         Color::Yellow
     } else {
         Color::DarkGray
@@ -658,8 +731,7 @@ mod tests {
     #[test]
     fn time_prefilled_with_now() {
         let app = App::new();
-        let parsed = parse_time_entry(&app.time_buf, now_time());
-        assert!(parsed.is_ok());
+        assert!(NaiveTime::parse_from_str(&app.time_buf, "%H:%M").is_ok());
     }
 
     #[test]
@@ -713,19 +785,113 @@ mod tests {
     }
 
     #[test]
-    fn submit_accepts_smart_time() {
+    fn submit_rejects_smart_time() {
+        for raw in ["930", "9", "now", "+30", "ages", ""] {
+            let mut app = App::new();
+            type_text(&mut app, "Standup");
+            app.handle_key(key(KeyCode::Tab));
+            app.handle_key(key(KeyCode::Tab));
+            app.time_buf = String::from(raw);
+            app.handle_key(key(KeyCode::Tab));
+            type_text(&mut app, "45m");
+            app.handle_key(key(KeyCode::Tab));
+            type_text(&mut app, "Agenda.");
+            app.handle_key(key(KeyCode::Enter));
+            assert!(!app.done, "{raw}");
+            assert_eq!(
+                app.error.as_deref(),
+                Some("bad time: expected HH:MM"),
+                "{raw}"
+            );
+        }
+    }
+
+    #[test]
+    fn submit_rejects_past_date() {
         let mut app = App::new();
         type_text(&mut app, "Standup");
         app.handle_key(key(KeyCode::Tab));
+        let yesterday = today()
+            .checked_add_signed(chrono::Duration::days(-1))
+            .unwrap();
+        app.date_buf = yesterday.format("%Y-%m-%d").to_string();
         app.handle_key(key(KeyCode::Tab));
-        app.time_buf = String::from("930");
+        app.handle_key(key(KeyCode::Tab));
+        type_text(&mut app, "45m");
+        app.handle_key(key(KeyCode::Tab));
+        type_text(&mut app, "Agenda.");
+        app.handle_key(key(KeyCode::Enter));
+        assert!(!app.done);
+        let error = app.error.unwrap();
+        assert!(error.contains("past"), "{error}");
+    }
+
+    #[test]
+    fn submit_accepts_future_date() {
+        let mut app = App::new();
+        type_text(&mut app, "Standup");
+        app.handle_key(key(KeyCode::Tab));
+        let tomorrow = today()
+            .checked_add_signed(chrono::Duration::days(1))
+            .unwrap();
+        app.date_buf = tomorrow.format("%Y-%m-%d").to_string();
+        app.handle_key(key(KeyCode::Tab));
         app.handle_key(key(KeyCode::Tab));
         type_text(&mut app, "45m");
         app.handle_key(key(KeyCode::Tab));
         type_text(&mut app, "Agenda.");
         app.handle_key(key(KeyCode::Enter));
         assert!(app.done);
-        let data = app.data().unwrap();
-        assert_eq!(data.time, NaiveTime::from_hms_opt(9, 30, 0).unwrap());
+        assert_eq!(app.data().unwrap().date, tomorrow);
+    }
+
+    #[test]
+    fn date_complains_live_while_typing() {
+        let mut app = App::new();
+        app.handle_key(key(KeyCode::Tab));
+        assert_eq!(app.focus, Field::Date);
+        app.date_buf.clear();
+        app.cursor = 0;
+        type_text(&mut app, "2020-01-01");
+        assert!(app.error.as_deref().unwrap().contains("past"));
+        app.date_buf.clear();
+        app.cursor = 0;
+        type_text(&mut app, "20");
+        assert!(app.error.as_deref().unwrap().contains("bad date"));
+        app.date_buf.clear();
+        app.cursor = 0;
+        type_text(&mut app, &today().format("%Y-%m-%d").to_string());
+        assert!(app.error.is_none());
+    }
+
+    #[test]
+    fn shift_date_into_past_complains() {
+        let mut app = App::new();
+        app.handle_key(key(KeyCode::Tab));
+        app.handle_key(key(KeyCode::Char('h')));
+        assert!(app.error.as_deref().unwrap().contains("past"));
+        app.handle_key(key(KeyCode::Char('l')));
+        assert!(app.error.is_none());
+    }
+
+    #[test]
+    fn face_shows_above_invalid_date() {
+        use ratatui::backend::TestBackend;
+        let mut bad = App::new();
+        bad.date_buf = String::from("2020-01-01");
+        for app in [App::new(), bad] {
+            let backend = TestBackend::new(80, 30);
+            let mut terminal = Terminal::new(backend).unwrap();
+            terminal.draw(|frame| render(frame, &app)).unwrap();
+            let text: String = terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect();
+            let has_face = DATE_FACES.iter().any(|face| text.contains(face));
+            assert_eq!(has_face, app.date_buf == "2020-01-01");
+        }
     }
 }
