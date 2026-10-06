@@ -1,4 +1,4 @@
-//! Git sync via the `git` CLI. Push without a remote is a no-op.
+//! Git sync via the `git` CLI. Pull/push without a remote are no-ops.
 
 use std::path::Path;
 use std::process::{Command, Output};
@@ -47,6 +47,109 @@ pub fn has_remote(dir: &Path) -> bool {
     git(dir, &["config", "remote.origin.url"])
         .map(|out| out.status.success() && !out.stdout.is_empty())
         .unwrap_or(false)
+}
+
+#[must_use]
+pub fn has_head(dir: &Path) -> bool {
+    git(dir, &["rev-parse", "--verify", "HEAD"])
+        .map(|out| out.status.success())
+        .unwrap_or(false)
+}
+
+#[must_use]
+pub fn has_upstream(dir: &Path) -> bool {
+    git(dir, &["rev-parse", "--verify", "@{u}"])
+        .map(|out| out.status.success())
+        .unwrap_or(false)
+}
+
+/// Pull remote changes before editing. No remote or no local commits = no-op.
+/// `--ff-only` never creates merge commits: diverged histories fail loudly.
+pub fn pull(dir: &Path) -> anyhow::Result<()> {
+    if !has_remote(dir) || !has_head(dir) {
+        return Ok(());
+    }
+    let out = git(dir, &["pull", "--ff-only", "-q"])?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(ChoraError::Git(stderr_of(&out)).into())
+    }
+}
+
+/// Merge remote changes on top of a local exit commit.
+/// For the detached `sync-after-open` child: the tree already holds our
+/// commit, so `--ff-only` would refuse any remote advance — rebase replays
+/// us on top instead. Conflicts fail loudly into `sync.log`, never silently.
+pub fn pull_rebase(dir: &Path) -> anyhow::Result<()> {
+    let out = git(dir, &["pull", "--rebase", "-q"])?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(ChoraError::Git(stderr_of(&out)).into())
+    }
+}
+
+/// First run on a new device: fetch the remote and check out its default
+/// branch. Must run before any layout files (`.gitignore`) are created —
+/// an untracked `.gitignore` would block the checkout even with identical
+/// content. No remote, no local HEAD needed, empty remote: all no-ops.
+pub fn ensure_from_remote(dir: &Path) -> anyhow::Result<()> {
+    if !has_remote(dir) || has_head(dir) {
+        return Ok(());
+    }
+    let fetch = git(dir, &["fetch", "origin"])?;
+    if !fetch.status.success() {
+        return Err(ChoraError::Git(stderr_of(&fetch)).into());
+    }
+    let Some(branch) = default_remote_branch(dir)? else {
+        return Ok(());
+    };
+    let out = git(dir, &["checkout", "-q", &branch])?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(ChoraError::Git(stderr_of(&out)).into())
+    }
+}
+
+/// Remote default branch name: `origin/HEAD`, then `main`/`master`,
+/// then the first remote branch. `None` = remote has no branches yet.
+fn default_remote_branch(dir: &Path) -> anyhow::Result<Option<String>> {
+    if let Ok(out) = git(dir, &["symbolic-ref", "refs/remotes/origin/HEAD"])
+        && out.status.success()
+    {
+        let target = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+        if let Some(name) = target.strip_prefix("refs/remotes/origin/") {
+            return Ok(Some(name.to_owned()));
+        }
+    }
+    for branch in ["main", "master"] {
+        let remote_ref = format!("origin/{branch}");
+        let out = git(dir, &["rev-parse", "--verify", &remote_ref])?;
+        if out.status.success() {
+            return Ok(Some(branch.to_owned()));
+        }
+    }
+    let out = git(
+        dir,
+        &[
+            "for-each-ref",
+            "--format=%(refname)",
+            "refs/remotes/origin/",
+        ],
+    )?;
+    if !out.status.success() {
+        return Err(ChoraError::Git(stderr_of(&out)).into());
+    }
+    let first = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.ends_with("/HEAD"))
+        .filter_map(|line| line.strip_prefix("refs/remotes/origin/"))
+        .next()
+        .map(str::to_owned);
+    Ok(first)
 }
 
 pub fn add_remote(dir: &Path, url: &str) -> anyhow::Result<()> {

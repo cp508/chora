@@ -519,3 +519,236 @@ fn open_rejects_unknown_target() {
         .unwrap();
     assert!(!out.status.success());
 }
+
+/// `git` with deterministic identity in the isolated HOME, so branch
+/// defaults match the ones chora itself sees under `cmd`.
+fn git_ok(env: &Env, dir: &Path, args: &[&str]) {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .env("HOME", &env.home)
+        .env_remove("XDG_CONFIG_HOME")
+        .env("GIT_AUTHOR_NAME", "tester")
+        .env("GIT_AUTHOR_EMAIL", "tester@example.com")
+        .env("GIT_COMMITTER_NAME", "tester")
+        .env("GIT_COMMITTER_EMAIL", "tester@example.com")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "git {} failed: {}",
+        args.join(" "),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// Bare remote inside the isolated HOME: same branch defaults as chora.
+fn init_bare_remote(env: &Env, name: &str) -> PathBuf {
+    let remote = env.home.join(name);
+    let out = Command::new("git")
+        .args(["init", "--bare", "-q"])
+        .arg(&remote)
+        .env("HOME", &env.home)
+        .env_remove("XDG_CONFIG_HOME")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    remote
+}
+
+fn clone_remote(env: &Env, remote: &Path, dest: &Path) {
+    let out = Command::new("git")
+        .args(["clone", "-q"])
+        .arg(remote)
+        .arg(dest)
+        .env("HOME", &env.home)
+        .env_remove("XDG_CONFIG_HOME")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "git clone failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+fn write_config_with_remote(env: &Env, remote: &Path) {
+    let cfg = env.home.join(".config").join("chora").join("config.toml");
+    let text = format!(
+        "[main]\nchora_dir = \"~/chora\"\neditor = \"\"\nopen_dirs = \"\"\nmanage_old_event = \"nothing\"\nremote_url = \"{}\"\n",
+        remote.display()
+    );
+    std::fs::write(&cfg, text).unwrap();
+}
+
+#[test]
+fn event_pulls_remote_before_editing() {
+    let env = setup();
+    assert!(cmd(&env).arg("init").output().unwrap().status.success());
+
+    let remote = init_bare_remote(&env, "remote.git");
+    write_config_with_remote(&env, &remote);
+
+    let editor = editor_script(&env, "noop.sh", "#!/bin/sh\nexit 0\n");
+    let root = storage(&env);
+    let out = cmd(&env)
+        .env("EDITOR", &editor)
+        .args([
+            "--dir",
+            &root.to_string_lossy(),
+            "event",
+            "--date",
+            "2026-11-20",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // Another device pushes while this one is idle.
+    let other = env.home.join("other");
+    clone_remote(&env, &remote, &other);
+    std::fs::create_dir_all(other.join("notes")).unwrap();
+    std::fs::write(other.join("notes").join("from-remote.md"), "# remote\n").unwrap();
+    git_ok(&env, &other, &["add", "-A"]);
+    git_ok(&env, &other, &["commit", "-qm", "remote note"]);
+    git_ok(&env, &other, &["push", "-q", "-u", "origin", "HEAD"]);
+
+    // The next edit must pull first: the remote note appears locally.
+    let out = cmd(&env)
+        .env("EDITOR", &editor)
+        .args([
+            "--dir",
+            &root.to_string_lossy(),
+            "event",
+            "--date",
+            "2026-11-21",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(root.join("notes").join("from-remote.md").exists());
+    assert!(root.join("events").join("2026-11-20.md").exists());
+    assert!(root.join("events").join("2026-11-21.md").exists());
+}
+
+/// Poll for a file the detached sync child is about to write.
+fn poll_file(path: &Path) {
+    for _ in 0..200 {
+        if path.exists() {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    panic!("background sync never wrote {}", path.display());
+}
+
+#[test]
+fn open_pulls_remote_in_background_on_exit() {
+    let env = setup();
+    assert!(cmd(&env).arg("init").output().unwrap().status.success());
+
+    let remote = init_bare_remote(&env, "remote.git");
+    write_config_with_remote(&env, &remote);
+
+    // First open seeds the repo; the commit lands from the background child.
+    let editor = editor_script(
+        &env,
+        "browse.sh",
+        "#!/bin/sh\nprintf '# local\\n' > \"$1/local.md\"\n",
+    );
+    let root = storage(&env);
+    let out = cmd(&env)
+        .env("EDITOR", &editor)
+        .args(["--dir", &root.to_string_lossy(), "open", "notes"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    poll_log(&root, "open: notes");
+
+    // Another device pushes while this one is idle.
+    let other = env.home.join("other");
+    clone_remote(&env, &remote, &other);
+    std::fs::create_dir_all(other.join("notes")).unwrap();
+    std::fs::write(other.join("notes").join("from-remote.md"), "# remote\n").unwrap();
+    git_ok(&env, &other, &["add", "-A"]);
+    git_ok(&env, &other, &["commit", "-qm", "remote note"]);
+    git_ok(&env, &other, &["push", "-q", "-u", "origin", "HEAD"]);
+
+    // The editor opens without waiting for the network; the remote note
+    // is merged by the detached sync child, so poll for it.
+    let editor2 = editor_script(
+        &env,
+        "browse2.sh",
+        "#!/bin/sh\nprintf '# local2\\n' > \"$1/local2.md\"\n",
+    );
+    let out = cmd(&env)
+        .env("EDITOR", &editor2)
+        .args(["--dir", &root.to_string_lossy(), "open", "notes"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    poll_file(&root.join("notes").join("from-remote.md"));
+    assert!(root.join("notes").join("local2.md").exists());
+    poll_log(&root, "open: notes");
+}
+
+#[test]
+fn first_run_checks_out_remote_on_new_device() {
+    // Seed device: its own HOME, its own bare remote.
+    let seed_env = setup();
+    let remote = init_bare_remote(&seed_env, "remote.git");
+    let seed = seed_env.home.join("seed");
+    clone_remote(&seed_env, &remote, &seed);
+    std::fs::create_dir_all(seed.join("notes")).unwrap();
+    std::fs::write(seed.join("notes").join("seed.md"), "# seed\n").unwrap();
+    git_ok(&seed_env, &seed, &["add", "-A"]);
+    git_ok(&seed_env, &seed, &["commit", "-qm", "seed"]);
+    git_ok(&seed_env, &seed, &["push", "-q", "-u", "origin", "HEAD"]);
+
+    // Fresh HOME, same remote: first use must fetch the seed before editing.
+    let env = setup();
+    assert!(cmd(&env).arg("init").output().unwrap().status.success());
+    write_config_with_remote(&env, &remote);
+
+    let editor = editor_script(&env, "noop.sh", "#!/bin/sh\nexit 0\n");
+    let root = storage(&env);
+    assert!(!root.exists());
+    let out = cmd(&env)
+        .env("EDITOR", &editor)
+        .args([
+            "--dir",
+            &root.to_string_lossy(),
+            "event",
+            "--date",
+            "2026-11-20",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(root.join("notes").join("seed.md").exists());
+    assert!(root.join("events").join("2026-11-20.md").exists());
+}

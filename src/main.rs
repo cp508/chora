@@ -29,6 +29,9 @@ fn main() -> anyhow::Result<()> {
             };
             // cwd = target: `sh -c '... $(fzf)'` openers scan cwd and ignore
             // the target arg (it lands in $0), so root would show both dirs.
+            // No network up here: the opener must start instantly, and nothing
+            // may delay the detach below. The pull lives in the detached
+            // `sync-after-open` child.
             if matches!(target, OpenTarget::Events) {
                 sweep_old_events(&store, &cfg)?;
             }
@@ -65,7 +68,7 @@ fn main() -> anyhow::Result<()> {
         Cmd::SyncAfterOpen { message } => {
             let (_cfg, store) = load_store(cli.dir.as_deref(), true)?;
             require_repo(&store)?;
-            commit_and_push(&store, &message)
+            pull_rebase_push(&store, &message)
         }
     }
 }
@@ -75,14 +78,18 @@ fn load_store(dir: Option<&Path>, bootstrap: bool) -> anyhow::Result<(Config, St
     let store = Store::new(cfg.root(dir));
     chora::debug_log!("root: {}", store.root().display());
     if bootstrap {
+        // Empty dirs never block a checkout; files (`.gitignore`) would,
+        // so the gitignore comes last, after the first fetch.
         store.ensure_layout()?;
-        store.ensure_gitignore()?;
         if !git::is_repo(store.root()) {
             git::init_repo(store.root())?;
         }
         if !cfg.main.remote_url.is_empty() && !git::has_remote(store.root()) {
             git::add_remote(store.root(), &cfg.main.remote_url)?;
         }
+        // New device: fetch + checkout before `.gitignore` exists.
+        git::ensure_from_remote(store.root())?;
+        store.ensure_gitignore()?;
     }
     Ok((cfg, store))
 }
@@ -114,6 +121,30 @@ fn commit_and_push(store: &Store, message: &str) -> anyhow::Result<()> {
         if git::commit(store.root(), message)? {
             git::push(store.root())?;
         }
+        Ok(())
+    })
+}
+
+/// Pull remote changes before editing. Fails loudly on diverged history
+/// or unreachable remote — never edit on a stale base silently.
+fn pull_before_edit(store: &Store) -> anyhow::Result<()> {
+    with_sync_lock(store.root(), || git::pull(store.root()))
+}
+
+/// Background tail of `open` (detached via `setsid`, failures go to
+/// `sync.log`): commit the exit state, merge remote work underneath it,
+/// then push. The editor is already closed, so the shell was never blocked.
+fn pull_rebase_push(store: &Store, message: &str) -> anyhow::Result<()> {
+    with_sync_lock(store.root(), || {
+        git::add_all(store.root())?;
+        let _ = git::commit(store.root(), message)?;
+        // First push ever has no upstream yet — `push` below sets it via
+        // `-u`; there is nothing to merge onto. Afterwards the branch
+        // tracks the remote, so rebase the exit commit onto fresh work.
+        if git::has_remote(store.root()) && git::has_upstream(store.root()) {
+            git::pull_rebase(store.root())?;
+        }
+        git::push(store.root())?;
         Ok(())
     })
 }
@@ -241,6 +272,7 @@ fn cmd_event_stub(
     open: Option<&str>,
 ) -> anyhow::Result<()> {
     let day = parse_date_arg(raw)?;
+    pull_before_edit(store)?;
     sweep_old_events(store, cfg)?;
     let path = store.ensure_day_file(day)?;
     store.append_section(day, "## \nTime: \nDuration: \n")?;
@@ -267,6 +299,8 @@ fn cmd_event_tui(
         duration,
         context: data.context.clone(),
     });
+    // Pull after the form, right before the write: the freshest base wins.
+    pull_before_edit(store)?;
     store.append_section(data.date, &rendered)?;
     let message = format!("event: {} {}", data.date.format("%Y-%m-%d"), data.title);
     sweep_old_events(store, cfg)?;
