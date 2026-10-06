@@ -24,7 +24,7 @@ use ratatui::{
 };
 
 use crate::cli::today;
-use crate::event::{parse_duration, parse_time_entry, shift_time_of_day};
+use crate::event::{parse_duration, parse_time_entry, snap_quarter};
 
 /// Data of a submitted form.
 #[derive(Debug, Clone, PartialEq)]
@@ -161,10 +161,10 @@ impl App {
         self.cursor = self.buf().chars().count();
     }
 
-    fn shift_time(&mut self, mins: i64) {
+    fn shift_time(&mut self, forward: bool) {
         let now = now_time();
         let base = parse_time_entry(&self.time_buf, now).unwrap_or(now);
-        self.time_buf = shift_time_of_day(base, mins).format("%H:%M").to_string();
+        self.time_buf = snap_quarter(base, forward).format("%H:%M").to_string();
         self.error = None;
         self.cursor = self.buf().chars().count();
     }
@@ -235,8 +235,8 @@ impl App {
         }
         if self.focus == Field::Time {
             match key.code {
-                KeyCode::Left => self.shift_time(-15),
-                KeyCode::Right => self.shift_time(15),
+                KeyCode::Left => self.shift_time(false),
+                KeyCode::Right => self.shift_time(true),
                 KeyCode::Char('j') => self.move_focus(1),
                 KeyCode::Char('k') => self.move_focus(-1),
                 KeyCode::Backspace => self.delete_before(),
@@ -467,7 +467,7 @@ fn render_footer(frame: &mut ratatui::Frame<'_>, area: Rect, error: Option<&str>
         "Tab, up/down: fields; Enter: create; Esc: cancel",
     ));
     lines.push(Line::from(
-        "date: left/right/h/l: day; time: left/right: 15m; j/k: fields",
+        "date: left/right/h/l: day; time: left/right: quarters; j/k: fields",
     ));
     let style = if error.is_some() {
         Style::default().fg(Color::Red)
@@ -663,26 +663,27 @@ mod tests {
     }
 
     #[test]
-    fn time_arrows_shift_15_minutes() {
+    fn time_arrows_snap_to_quarters() {
+        use crate::event::shift_time_of_day;
         use chrono::Timelike;
         let mut app = App::new();
         app.handle_key(key(KeyCode::Tab));
         app.handle_key(key(KeyCode::Tab));
         assert_eq!(app.focus, Field::Time);
-        let before = NaiveTime::parse_from_str(&app.time_buf, "%H:%M")
-            .unwrap()
-            .num_seconds_from_midnight();
+        // Ahead lands strictly on the next mark (whatever the prefill was).
         app.handle_key(key(KeyCode::Right));
-        let after = NaiveTime::parse_from_str(&app.time_buf, "%H:%M")
-            .unwrap()
-            .num_seconds_from_midnight();
-        assert_eq!((after + 86400 - before) % 86400, 900);
+        let first = NaiveTime::parse_from_str(&app.time_buf, "%H:%M").unwrap();
+        assert_eq!(first.minute() % 15, 0);
+        // On a mark it keeps stepping.
+        app.handle_key(key(KeyCode::Right));
+        let second = NaiveTime::parse_from_str(&app.time_buf, "%H:%M").unwrap();
+        assert_eq!(second, shift_time_of_day(first, 15));
+        // Behind mirrors it.
         app.handle_key(key(KeyCode::Left));
-        app.handle_key(key(KeyCode::Left));
-        let back = NaiveTime::parse_from_str(&app.time_buf, "%H:%M")
-            .unwrap()
-            .num_seconds_from_midnight();
-        assert_eq!((before + 86400 - back) % 86400, 900);
+        assert_eq!(
+            NaiveTime::parse_from_str(&app.time_buf, "%H:%M").unwrap(),
+            first
+        );
     }
 
     #[test]

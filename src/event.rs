@@ -136,6 +136,25 @@ pub fn shift_time_of_day(time: NaiveTime, mins: i64) -> NaiveTime {
         .0
 }
 
+/// Step to the neighbouring quarter mark (`00`, `15`, `30`, `45`).
+/// Already on a mark: move a full 15 minutes; otherwise snap to the
+/// nearest mark ahead (`forward`) or behind. Wraps past midnight.
+#[must_use]
+pub fn snap_quarter(time: NaiveTime, forward: bool) -> NaiveTime {
+    use chrono::Timelike;
+    const STEP: i64 = 15;
+    const DAY: i64 = 24 * 60;
+    let day_mins = (time.num_seconds_from_midnight() / 60) as i64;
+    let next = if forward {
+        (day_mins / STEP + 1) * STEP
+    } else {
+        (day_mins - 1).div_euclid(STEP) * STEP
+    };
+    let wrapped = next.rem_euclid(DAY);
+    NaiveTime::from_hms_opt((wrapped / 60) as u32, (wrapped % 60) as u32, 0)
+        .expect("snapped time is in range")
+}
+
 /// Parse a day file into events. Sections without `Time:` are skipped.
 #[must_use]
 pub fn parse_day(date: NaiveDate, text: &str) -> Vec<Event> {
@@ -338,6 +357,33 @@ mod tests {
         ];
         for (raw, expected) in cases {
             assert_eq!(parse_time_entry(raw, now).unwrap(), expected, "{raw}");
+        }
+    }
+
+    #[test]
+    fn snap_quarter_table() {
+        let at = |h, m| NaiveTime::from_hms_opt(h, m, 0).unwrap();
+        let cases = [
+            // Between marks: snap to the nearest ahead/behind.
+            ((14, 37, true), (14, 45)),
+            ((14, 37, false), (14, 30)),
+            ((14, 1, true), (14, 15)),
+            ((14, 59, false), (14, 45)),
+            // On a mark: a full step.
+            ((14, 30, true), (14, 45)),
+            ((14, 30, false), (14, 15)),
+            ((14, 0, true), (14, 15)),
+            // Midnight wrap.
+            ((23, 45, true), (0, 0)),
+            ((0, 0, false), (23, 45)),
+            ((0, 7, false), (0, 0)),
+        ];
+        for ((h, m, forward), (eh, em)) in cases {
+            assert_eq!(
+                snap_quarter(at(h, m), forward),
+                at(eh, em),
+                "{h}:{m} {forward}"
+            );
         }
     }
 
