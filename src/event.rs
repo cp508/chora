@@ -84,6 +84,58 @@ pub fn format_duration(duration: Duration) -> String {
     out
 }
 
+/// Parse a TUI time entry against `now`.
+///
+/// Accepted forms: `HH:MM`, `HHMM`, `H`/`HH` (hour sharp), `now`/empty
+/// (keep `now`), `+NN` (NN minutes from now), `+<duration>` (`+1h30m`).
+/// Offsets wrap past midnight.
+pub fn parse_time_entry(raw: &str, now: NaiveTime) -> Result<NaiveTime, ChoraError> {
+    let bad = || ChoraError::BadTime(raw.to_owned());
+    let text = raw.trim();
+    if text.is_empty() || text.eq_ignore_ascii_case("now") {
+        return Ok(now);
+    }
+    if let Some(rest) = text.strip_prefix('+') {
+        let rest = rest.trim();
+        if !rest.is_empty() && rest.chars().all(|ch| ch.is_ascii_digit()) {
+            let mins: i64 = rest.parse().map_err(|_| bad())?;
+            return Ok(shift_time_of_day(now, mins));
+        }
+        let duration = parse_duration(rest)?;
+        let secs = duration.as_secs();
+        let mins = secs.div_ceil(60) as i64;
+        return Ok(shift_time_of_day(now, mins));
+    }
+    if let Some((hours, mins)) = text.split_once(':') {
+        let hours: u32 = hours.parse().map_err(|_| bad())?;
+        let mins: u32 = mins.parse().map_err(|_| bad())?;
+        return NaiveTime::from_hms_opt(hours, mins, 0).ok_or_else(bad);
+    }
+    if !text.chars().all(|ch| ch.is_ascii_digit()) {
+        return Err(bad());
+    }
+    match text.len() {
+        1 | 2 => {
+            let hours: u32 = text.parse().map_err(|_| bad())?;
+            NaiveTime::from_hms_opt(hours, 0, 0).ok_or_else(bad)
+        }
+        3 | 4 => {
+            let (hours, mins) = text.split_at(text.len() - 2);
+            let hours: u32 = hours.parse().map_err(|_| bad())?;
+            let mins: u32 = mins.parse().map_err(|_| bad())?;
+            NaiveTime::from_hms_opt(hours, mins, 0).ok_or_else(bad)
+        }
+        _ => Err(bad()),
+    }
+}
+
+/// Shift a time of day, wrapping past midnight.
+#[must_use]
+pub fn shift_time_of_day(time: NaiveTime, mins: i64) -> NaiveTime {
+    time.overflowing_add_signed(chrono::Duration::minutes(mins))
+        .0
+}
+
 /// Parse a day file into events. Sections without `Time:` are skipped.
 #[must_use]
 pub fn parse_day(date: NaiveDate, text: &str) -> Vec<Event> {
@@ -263,5 +315,39 @@ mod tests {
         };
         let parsed = parse_day(date(), &render_section(&event));
         assert_eq!(parsed, vec![event]);
+    }
+
+    #[test]
+    fn parse_time_entry_table() {
+        let now = NaiveTime::from_hms_opt(14, 0, 0).unwrap();
+        let at = |h, m| NaiveTime::from_hms_opt(h, m, 0).unwrap();
+        let cases = [
+            ("14:30", at(14, 30)),
+            (" 9:05 ", at(9, 5)),
+            ("1430", at(14, 30)),
+            ("930", at(9, 30)),
+            ("9", at(9, 0)),
+            ("09", at(9, 0)),
+            ("", now),
+            ("now", now),
+            ("NOW", now),
+            ("+30", at(14, 30)),
+            ("+1h", at(15, 0)),
+            ("+1h30m", at(15, 30)),
+            ("+600m", at(0, 0)),
+        ];
+        for (raw, expected) in cases {
+            assert_eq!(parse_time_entry(raw, now).unwrap(), expected, "{raw}");
+        }
+    }
+
+    #[test]
+    fn parse_time_entry_rejects_garbage() {
+        let now = NaiveTime::from_hms_opt(14, 0, 0).unwrap();
+        for raw in [
+            "25:00", "12:60", "abc", "14:30:00", "12345", "+abc", "+", "-", "14-30", "1h",
+        ] {
+            assert!(parse_time_entry(raw, now).is_err(), "{raw}");
+        }
     }
 }

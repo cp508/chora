@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use chora::cli::{Cli, Cmd, parse_date_arg};
+use chora::cli::{Cli, Cmd, HELP_TREE, OpenTarget, parse_date_arg};
 use chora::config::Config;
 use chora::error::ChoraError;
 use chora::store::Store;
@@ -13,17 +13,31 @@ fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     chora::log::init(cli.debug);
     chora::debug_log!("debug logging on");
-    match cli.cmd {
+    let Some(cmd) = cli.cmd else {
+        print!("{HELP_TREE}");
+        return Ok(());
+    };
+    match cmd {
         Cmd::Init => cmd_init(),
-        Cmd::__Finalize { message } => {
-            let (_cfg, store) = load_store(cli.dir.as_deref())?;
-            require_repo(&store)?;
-            git::finalize(store.root(), &message)
-        }
         Cmd::Note => {
             let (cfg, store) = load_store(cli.dir.as_deref())?;
             require_repo(&store)?;
-            session::run(store.root(), &store.notes_dir(), cfg.every()?, opener(&cfg))
+            session::run(
+                store.root(),
+                &store.notes_dir(),
+                cfg.every()?,
+                dirs_opener(&cfg),
+            )
+        }
+        Cmd::Open { target } => {
+            let (cfg, store) = load_store(cli.dir.as_deref())?;
+            require_repo(&store)?;
+            let (dir, name) = match target {
+                OpenTarget::Notes => (store.notes_dir(), "notes"),
+                OpenTarget::Events => (store.events_dir(), "events"),
+            };
+            editor::open(&dir, store.root(), dirs_opener(&cfg))?;
+            commit_and_push(&store, &format!("open: {name}"))
         }
         Cmd::Event {
             date,
@@ -32,7 +46,7 @@ fn main() -> anyhow::Result<()> {
         } => {
             let (cfg, store) = load_store(cli.dir.as_deref())?;
             require_repo(&store)?;
-            let open = opener(&cfg);
+            let open = files_opener(&cfg);
             match (date, use_tui) {
                 (Some(_), true) => Err(ChoraError::EventExclusiveTarget.into()),
                 (None, false) => Err(ChoraError::EventNeedsTarget.into()),
@@ -52,6 +66,11 @@ fn main() -> anyhow::Result<()> {
             }
             Ok(())
         }
+        Cmd::__Finalize { message } => {
+            let (_cfg, store) = load_store(cli.dir.as_deref())?;
+            require_repo(&store)?;
+            git::finalize(store.root(), &message)
+        }
     }
 }
 
@@ -64,9 +83,19 @@ fn load_store(dir: Option<&Path>) -> anyhow::Result<(Config, Store)> {
     Ok((cfg, store))
 }
 
-/// Opener command from the config (`editor`), if set. Empty means `$EDITOR`.
-fn opener(cfg: &Config) -> Option<&str> {
-    let cmd = cfg.main.editor.trim();
+/// Opener for files from the config (`editor`), if set.
+fn files_opener(cfg: &Config) -> Option<&str> {
+    picked(&cfg.main.editor)
+}
+
+/// Opener for directories from the config (`open_dirs`), if set.
+fn dirs_opener(cfg: &Config) -> Option<&str> {
+    picked(&cfg.main.open_dirs)
+}
+
+/// Non-empty trimmed command, if there is one.
+fn picked(raw: &str) -> Option<&str> {
+    let cmd = raw.trim();
     (!cmd.is_empty()).then_some(cmd)
 }
 
@@ -140,7 +169,7 @@ fn cmd_event_tui(store: &Store, confirm: bool, open: Option<&str>) -> anyhow::Re
     let rendered = event::render_section(&event::Event {
         title: data.name.clone(),
         date: data.date,
-        time: chrono::Local::now().time(),
+        time: data.time,
         duration,
         context: data.context.clone(),
     });

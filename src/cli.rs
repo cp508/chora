@@ -1,20 +1,49 @@
 //! Clap declaration of the CLI: one command — one job.
+//!
+//! Help flags are disabled on purpose: bare `chora` prints [`HELP_TREE`].
 
 use std::path::PathBuf;
 
 use anyhow::Context;
 use chrono::NaiveDate;
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 
 use crate::error::ChoraError;
 
-/// `chora [--dir <path>] <command>`.
+/// Full command tree, printed for bare `chora`.
+pub const HELP_TREE: &str = r#"Commands:
+  init           Bootstrap the config and the storage. Takes no flags.
+  note           Session over notes/: dirs-opener + autocommit ticker.
+  open           Open a storage dir once in the dirs-opener, commit on exit.
+    <notes|events>
+                 which directory to open
+  event          Day events.
+    --date <DATE>
+                 append a stub to the day file and open it in the file opener
+    --tui
+                 TUI form for creating an event
+    --confirm
+                 with --tui: open the day file after submit
+  show           Show the events of a day.
+    --date <DATE>
+                 which day to show
+    --json
+                 print a JSON array for scripts
+Options:
+  --dir <PATH>   override chora_dir for one run
+  --debug        verbose internals on stderr
+<DATE> is today, tomorrow, or YYYY-MM-DD.
+Openers: `editor` for files, `open_dirs` for directories, $EDITOR when empty.
+"#;
+
+/// `chora [--dir <path>] [--debug] <command>`. No command prints the tree.
 #[derive(Debug, Parser)]
 #[command(
     name = "chora",
     version,
-    about = "Lightweight CLI organizer: markdown, calendar, git sync",
-    long_about = "COMMANDS:\n\n  init\n    Bootstrap the config and the storage. Takes no flags.\n\n  note\n    Session: open notes/ in the opener, autocommit every auto_commit minutes.\n\n  event --date <DATE>\n    Append an event stub to the day file and open it in the opener.\n\n  event --tui [--confirm]\n    TUI form for creating an event. With --confirm, open the day file after submit.\n\n  show --date <DATE> [--json]\n    Show the events of a day. With --json, print a JSON array for scripts.\n\n<DATE> is today, tomorrow, or YYYY-MM-DD.\nGlobal flag: --dir <PATH> overrides chora_dir for one run.\nOpener: config `editor`, or $EDITOR when empty."
+    about = "Lightweight CLI organizer: markdown, events, git sync",
+    disable_help_flag = true,
+    disable_help_subcommand = true
 )]
 pub struct Cli {
     /// Override `chora_dir` from the config for one run.
@@ -26,29 +55,48 @@ pub struct Cli {
     pub debug: bool,
 
     #[command(subcommand)]
-    pub cmd: Cmd,
+    pub cmd: Option<Cmd>,
+}
+
+/// Which storage directory to open.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum OpenTarget {
+    /// The `notes/` directory.
+    Notes,
+    /// The `events/` directory.
+    Events,
 }
 
 /// chora subcommands.
 #[derive(Debug, Subcommand)]
 pub enum Cmd {
     /// Bootstrap the config and the storage. No flags — everything comes from the config.
+    #[command(disable_help_flag = true)]
     Init,
-    /// Session: open notes/ in the opener + autocommit every `auto_commit` minutes.
+    /// Session: open notes/ in the dirs-opener + autocommit every `auto_commit` minutes.
+    #[command(disable_help_flag = true)]
     Note,
+    /// Open a storage dir once in the dirs-opener, commit on exit.
+    #[command(disable_help_flag = true)]
+    Open {
+        /// Which directory to open.
+        target: OpenTarget,
+    },
     /// Day events.
+    #[command(disable_help_flag = true)]
     Event {
-        /// Append an event stub to the date file and open it in the opener.
+        /// Append an event stub to the date file and open it in the file opener.
         #[arg(long, value_name = "DATE")]
         date: Option<String>,
         /// TUI form for creating an event.
         #[arg(long)]
         tui: bool,
-        /// After the TUI, open the day file in the opener right away.
+        /// After the TUI, open the day file in the file opener right away.
         #[arg(long)]
         confirm: bool,
     },
     /// Show the events of a day.
+    #[command(disable_help_flag = true)]
     Show {
         /// Date: today|tomorrow|YYYY-MM-DD.
         #[arg(long)]
@@ -58,7 +106,7 @@ pub enum Cmd {
         json: bool,
     },
     /// Background final commit (spawned detached by `note`, not for humans).
-    #[command(name = "__finalize", hide = true)]
+    #[command(name = "__finalize", hide = true, disable_help_flag = true)]
     __Finalize {
         /// Commit message, precomputed by the parent process.
         #[arg(long)]
@@ -87,9 +135,26 @@ mod tests {
     use super::*;
 
     #[test]
+    fn bare_chora_has_no_command() {
+        let cli = Cli::try_parse_from(["chora"]).unwrap();
+        assert!(cli.cmd.is_none());
+    }
+
+    #[test]
     fn parses_show_with_json() {
         let cli = Cli::try_parse_from(["chora", "show", "--date", "2026-11-20", "--json"]).unwrap();
-        assert!(matches!(cli.cmd, Cmd::Show { json: true, .. }));
+        assert!(matches!(cli.cmd, Some(Cmd::Show { json: true, .. })));
+    }
+
+    #[test]
+    fn parses_open_notes() {
+        let cli = Cli::try_parse_from(["chora", "open", "notes"]).unwrap();
+        assert!(matches!(
+            cli.cmd,
+            Some(Cmd::Open {
+                target: OpenTarget::Notes
+            })
+        ));
     }
 
     #[test]
@@ -104,11 +169,11 @@ mod tests {
         let cli = Cli::try_parse_from(["chora", "event", "--tui", "--confirm"]).unwrap();
         assert!(matches!(
             cli.cmd,
-            Cmd::Event {
+            Some(Cmd::Event {
                 tui: true,
                 confirm: true,
                 date: None
-            }
+            })
         ));
     }
 

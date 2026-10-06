@@ -53,6 +53,10 @@ pub enum ChoraError {
     #[error("bad duration `{0}`: expected 10s|45m|2h|1h30m")]
     BadDuration(String),
 
+    /// Bad time entry.
+    #[error("bad time `{0}`: expected HH:MM|HHMM|H|now|+30")]
+    BadTime(String),
+
     /// `event` was called with neither `--date` nor `--tui`.
     #[error("need --date <date> or --tui")]
     EventNeedsTarget,

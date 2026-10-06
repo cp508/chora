@@ -73,10 +73,12 @@ fn init_bootstraps_and_is_idempotent() {
     let text = std::fs::read_to_string(&cfg).unwrap();
     assert!(text.contains("chora_dir"));
     assert!(text.contains("auto_commit"));
+    assert!(text.contains("editor = "));
+    assert!(text.contains("open_dirs"));
     assert!(text.contains("remote_url"));
 
     let root = storage(&env);
-    assert!(root.join("calendar").is_dir());
+    assert!(root.join("events").is_dir());
     assert!(root.join("notes").is_dir());
     assert!(root.join(".git").is_dir());
     assert!(root.join(".gitignore").exists());
@@ -122,7 +124,7 @@ fn event_then_show_roundtrip() {
         String::from_utf8_lossy(&out.stderr)
     );
 
-    let day = std::fs::read_to_string(root.join("calendar").join("2026-11-20.md")).unwrap();
+    let day = std::fs::read_to_string(root.join("events").join("2026-11-20.md")).unwrap();
     assert!(day.starts_with("# 2026-11-20\n"));
     assert!(day.contains("## Standup"));
 
@@ -223,7 +225,7 @@ fn event_stub_appends_template_and_commits() {
         String::from_utf8_lossy(&out.stderr)
     );
 
-    let day = std::fs::read_to_string(root.join("calendar").join("2026-11-21.md")).unwrap();
+    let day = std::fs::read_to_string(root.join("events").join("2026-11-21.md")).unwrap();
     assert!(day.contains("Time:"));
     assert!(day.contains("Duration:"));
     assert!(
@@ -316,16 +318,16 @@ fn event_outside_repo_points_to_init() {
 }
 
 #[test]
-fn note_uses_config_editor_over_env() {
+fn note_uses_config_dirs_opener() {
     let env = setup();
     assert!(cmd(&env).arg("init").output().unwrap().status.success());
 
-    // The opener comes from the config, $EDITOR is not even set.
+    // The dirs-opener comes from the config, $EDITOR is not even set.
     let script = env.home.join("opener.sh");
     std::fs::write(&script, "#!/bin/sh\nprintf '# hi\\n' > \"$1/hi.md\"\n").unwrap();
     let cfg = env.home.join(".config").join("chora").join("config.toml");
     let text = format!(
-        "[main]\nchora_dir = \"~/chora\"\nauto_commit = 10\neditor = \"sh {}\"\nremote_url = \"\"\n",
+        "[main]\nchora_dir = \"~/chora\"\nauto_commit = 10\neditor = \"\"\nopen_dirs = \"sh {}\"\nremote_url = \"\"\n",
         script.display()
     );
     std::fs::write(&cfg, text).unwrap();
@@ -367,10 +369,79 @@ fn init_migrates_old_config_with_new_marker() {
     let text = std::fs::read_to_string(&cfg).unwrap();
     assert!(text.contains("# my tweaks"));
     assert!(text.contains("auto_commit = 7"));
-    assert!(text.contains("# NEW\neditor = \"\"\nremote_url = \"\"\n"));
+    assert!(text.contains("# NEW\n"));
+    assert!(text.contains("editor = \"\""));
+    assert!(text.contains("open_dirs = \"\""));
+    assert!(text.contains("remote_url = \"\""));
 
     // Second init stays quiet.
     let out = cmd(&env).arg("init").output().unwrap();
     assert!(out.status.success());
     assert!(!String::from_utf8_lossy(&out.stdout).contains("new config fields added"));
+}
+
+#[test]
+fn open_notes_commits_on_exit() {
+    let env = setup();
+    assert!(cmd(&env).arg("init").output().unwrap().status.success());
+
+    let editor = editor_script(
+        &env,
+        "browse.sh",
+        "#!/bin/sh\nprintf '# picked\\n' > \"$1/picked.md\"\n",
+    );
+    let root = storage(&env);
+    let out = cmd(&env)
+        .env("EDITOR", &editor)
+        .args(["--dir", &root.to_string_lossy(), "open", "notes"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(root.join("notes").join("picked.md").exists());
+    assert!(
+        git_log(&root)
+            .lines()
+            .any(|line| line.starts_with("open: notes"))
+    );
+}
+
+#[test]
+fn open_events_opens_the_events_dir() {
+    let env = setup();
+    assert!(cmd(&env).arg("init").output().unwrap().status.success());
+
+    let editor = editor_script(
+        &env,
+        "browse.sh",
+        "#!/bin/sh\nprintf '# seen\\n' > \"$1/seen.md\"\n",
+    );
+    let root = storage(&env);
+    let out = cmd(&env)
+        .env("EDITOR", &editor)
+        .args(["--dir", &root.to_string_lossy(), "open", "events"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(root.join("events").join("seen.md").exists());
+}
+
+#[test]
+fn open_rejects_unknown_target() {
+    let env = setup();
+    assert!(cmd(&env).arg("init").output().unwrap().status.success());
+
+    let root = storage(&env);
+    let out = cmd(&env)
+        .args(["--dir", &root.to_string_lossy(), "open", "bogus"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
 }

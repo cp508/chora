@@ -15,17 +15,21 @@ pub struct Config {
     pub main: Main,
 }
 
-/// The `[main]` section: exactly four fields, nothing extra.
+/// The `[main]` section: exactly five fields, nothing extra.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Main {
     /// Storage root. A leading `~/` expands to the home directory.
     pub chora_dir: String,
     /// `chora note` autocommit interval in minutes. Minimum 1.
     pub auto_commit: u64,
-    /// Opener command for notes, e.g. "hx .", "yazi", "code --wait".
-    /// Empty string = use $EDITOR. Split like a shell line.
+    /// Opener command for files (day files). Empty string = use $EDITOR.
+    /// Split like a shell line.
     #[serde(default)]
     pub editor: String,
+    /// Opener command for directories (`notes/`, `events/`).
+    /// Empty string = use $EDITOR. Split like a shell line.
+    #[serde(default)]
+    pub open_dirs: String,
     /// SSH URL of the remote. Empty string = local-only git.
     #[serde(default)]
     pub remote_url: String,
@@ -37,6 +41,7 @@ impl Default for Main {
             chora_dir: String::from("~/chora"),
             auto_commit: 10,
             editor: String::new(),
+            open_dirs: String::new(),
             remote_url: String::new(),
         }
     }
@@ -61,8 +66,40 @@ fn known_fields() -> Vec<(&'static str, toml::Value)> {
             toml::Value::Integer(defaults.auto_commit as i64),
         ),
         ("editor", toml::Value::String(defaults.editor)),
+        ("open_dirs", toml::Value::String(defaults.open_dirs)),
         ("remote_url", toml::Value::String(defaults.remote_url)),
     ]
+}
+
+/// One-line comment explaining a key in the generated file.
+fn field_comment(key: &str) -> Option<&'static str> {
+    match key {
+        "chora_dir" => Some("# Storage root. A leading ~/ expands to your home directory."),
+        "auto_commit" => Some("# `chora note` autocommit interval, minutes. Minimum 1."),
+        "editor" => Some(
+            "# Opener for files (day files). Empty = use $EDITOR. Try \"hx\" or \"code --wait\".",
+        ),
+        "open_dirs" => {
+            Some("# Opener for directories (notes/, events/). Empty = use $EDITOR. Try \"yazi\".")
+        }
+        "remote_url" => Some("# SSH URL of the git remote. Empty = local-only git."),
+        _ => None,
+    }
+}
+
+/// Fresh config file text: header + commented keys.
+fn default_file_text() -> String {
+    let mut out = String::from(
+        "# chora config. After upgrades, re-run `chora init`: missing keys\n# are appended at the bottom under `# NEW`, your values are kept.\n[main]\n",
+    );
+    for (key, value) in known_fields() {
+        if let Some(comment) = field_comment(key) {
+            out.push_str(comment);
+            out.push('\n');
+        }
+        out.push_str(&format!("{key} = {value}\n"));
+    }
+    out
 }
 
 impl Config {
@@ -114,8 +151,7 @@ impl Config {
                 std::fs::create_dir_all(parent)
                     .with_context(|| format!("failed to create {}", parent.display()))?;
             }
-            let text = toml::to_string_pretty(&Self::default())
-                .context("failed to serialize the default config")?;
+            let text = default_file_text();
             std::fs::write(path, text)
                 .with_context(|| format!("failed to write {}", path.display()))?;
             return Ok(Ensured {
@@ -162,6 +198,10 @@ impl Config {
         out.push_str("# NEW\n");
         let mut added = Vec::new();
         for (key, value) in &missing {
+            if let Some(comment) = field_comment(key) {
+                out.push_str(comment);
+                out.push('\n');
+            }
             out.push_str(&format!("{key} = {value}\n"));
             added.push((*key).to_owned());
         }
@@ -231,6 +271,7 @@ mod tests {
         assert_eq!(cfg.main.chora_dir, "~/chora");
         assert_eq!(cfg.main.auto_commit, 10);
         assert!(cfg.main.editor.is_empty());
+        assert!(cfg.main.open_dirs.is_empty());
         assert!(cfg.main.remote_url.is_empty());
     }
 
@@ -268,17 +309,19 @@ mod tests {
         assert_eq!(cfg.main.chora_dir, "/tmp/c");
         assert_eq!(cfg.main.auto_commit, 5);
         assert_eq!(cfg.main.editor, "yazi");
+        assert!(cfg.main.open_dirs.is_empty());
         assert_eq!(cfg.main.remote_url, "ssh://vps/x");
     }
 
     #[test]
-    fn load_from_defaults_missing_editor() {
+    fn load_from_defaults_missing_openers() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         let text = "[main]\nchora_dir = \"/tmp/c\"\nauto_commit = 5\n";
         std::fs::write(&path, text).unwrap();
         let cfg = Config::load_from(&path).unwrap();
         assert!(cfg.main.editor.is_empty());
+        assert!(cfg.main.open_dirs.is_empty());
     }
 
     #[test]
@@ -313,6 +356,7 @@ mod tests {
         assert_eq!(cfg.main.chora_dir, "~/chora");
         assert_eq!(cfg.main.auto_commit, 10);
         assert!(cfg.main.editor.is_empty());
+        assert!(cfg.main.open_dirs.is_empty());
         assert!(cfg.main.remote_url.is_empty());
     }
 
@@ -326,10 +370,13 @@ mod tests {
         )
         .unwrap();
         let ensured = Config::ensure_exists_at(&path).unwrap();
-        assert_eq!(ensured.added, vec!["editor", "remote_url"]);
+        assert_eq!(ensured.added, vec!["editor", "open_dirs", "remote_url"]);
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.contains("# my old config"));
-        assert!(text.contains("# NEW\neditor = \"\"\nremote_url = \"\"\n"));
+        assert!(text.contains("# NEW\n"));
+        assert!(text.contains("editor = \"\""));
+        assert!(text.contains("open_dirs = \"\""));
+        assert!(text.contains("remote_url = \"\""));
         let cfg = Config::load_from(&path).unwrap();
         assert_eq!(cfg.main.chora_dir, "/tmp/keep");
         assert_eq!(cfg.main.auto_commit, 3);
@@ -341,7 +388,7 @@ mod tests {
         let path = dir.path().join("config.toml");
         std::fs::write(
             &path,
-            "[main]\nchora_dir = \"/tmp/c\"\nauto_commit = 5\neditor = \"yazi\"\nremote_url = \"\"\n",
+            "[main]\nchora_dir = \"/tmp/c\"\nauto_commit = 5\neditor = \"yazi\"\nopen_dirs = \"yazi\"\nremote_url = \"\"\n",
         )
         .unwrap();
         let before = std::fs::read_to_string(&path).unwrap();

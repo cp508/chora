@@ -1,12 +1,14 @@
 //! `event --tui`: a minimal event-creation form (ratatui + crossterm).
 //!
-//! Four fields: `name` (-> the `##` title), `date`, `duration`, `context`.
+//! Five fields: `name` (-> the `##` title), `date`, `time`, `duration`,
+//! `context`. `time` is prefilled with now and accepts `HH:MM`, `HHMM`,
+//! `H`, `now`, `+30` (minutes from now).
 //! `Enter` submits from anywhere (so `context` is single-line input with
 //! visual wrapping), `Esc` cancels without writing anything.
 
 use std::io;
 
-use chrono::NaiveDate;
+use chrono::{NaiveDate, NaiveTime};
 use crossterm::{
     event::{self, Event as CrosstermEvent, KeyCode, KeyEvent, KeyModifiers},
     execute,
@@ -22,7 +24,7 @@ use ratatui::{
 };
 
 use crate::cli::today;
-use crate::event::parse_duration;
+use crate::event::{parse_duration, parse_time_entry, shift_time_of_day};
 
 /// Data of a submitted form.
 #[derive(Debug, Clone, PartialEq)]
@@ -31,6 +33,8 @@ pub struct TuiData {
     pub name: String,
     /// Target day file.
     pub date: NaiveDate,
+    /// Event time (`Time:`).
+    pub time: NaiveTime,
     /// Raw duration text (`45m`, `2h`, `1h30m`).
     pub duration_raw: String,
     /// Free-form context.
@@ -51,6 +55,7 @@ pub enum TuiOutcome {
 enum Field {
     Name,
     Date,
+    Time,
     Duration,
     Context,
 }
@@ -59,7 +64,8 @@ impl Field {
     fn next(self) -> Self {
         match self {
             Self::Name => Self::Date,
-            Self::Date => Self::Duration,
+            Self::Date => Self::Time,
+            Self::Time => Self::Duration,
             Self::Duration => Self::Context,
             Self::Context => Self::Name,
         }
@@ -69,7 +75,8 @@ impl Field {
         match self {
             Self::Name => Self::Context,
             Self::Date => Self::Name,
-            Self::Duration => Self::Date,
+            Self::Time => Self::Date,
+            Self::Duration => Self::Time,
             Self::Context => Self::Duration,
         }
     }
@@ -80,6 +87,7 @@ struct App {
     focus: Field,
     name: String,
     date_buf: String,
+    time_buf: String,
     duration: String,
     context: String,
     /// Cursor as a char index into the focused buffer.
@@ -89,12 +97,18 @@ struct App {
     cancelled: bool,
 }
 
+/// Current local time, the default event time.
+fn now_time() -> NaiveTime {
+    chrono::Local::now().time()
+}
+
 impl App {
     fn new() -> Self {
         Self {
             focus: Field::Name,
             name: String::new(),
             date_buf: today().format("%Y-%m-%d").to_string(),
+            time_buf: now_time().format("%H:%M").to_string(),
             duration: String::new(),
             context: String::new(),
             cursor: 0,
@@ -108,6 +122,7 @@ impl App {
         match self.focus {
             Field::Name => &self.name,
             Field::Date => &self.date_buf,
+            Field::Time => &self.time_buf,
             Field::Duration => &self.duration,
             Field::Context => &self.context,
         }
@@ -117,6 +132,7 @@ impl App {
         match self.focus {
             Field::Name => &mut self.name,
             Field::Date => &mut self.date_buf,
+            Field::Time => &mut self.time_buf,
             Field::Duration => &mut self.duration,
             Field::Context => &mut self.context,
         }
@@ -142,6 +158,14 @@ impl App {
             }
             None => self.error = Some(String::from("bad date: expected YYYY-MM-DD")),
         }
+        self.cursor = self.buf().chars().count();
+    }
+
+    fn shift_time(&mut self, mins: i64) {
+        let now = now_time();
+        let base = parse_time_entry(&self.time_buf, now).unwrap_or(now);
+        self.time_buf = shift_time_of_day(base, mins).format("%H:%M").to_string();
+        self.error = None;
         self.cursor = self.buf().chars().count();
     }
 
@@ -209,6 +233,18 @@ impl App {
             }
             return;
         }
+        if self.focus == Field::Time {
+            match key.code {
+                KeyCode::Left => self.shift_time(-15),
+                KeyCode::Right => self.shift_time(15),
+                KeyCode::Char('j') => self.move_focus(1),
+                KeyCode::Char('k') => self.move_focus(-1),
+                KeyCode::Backspace => self.delete_before(),
+                KeyCode::Char(ch) => self.insert(ch),
+                _ => {}
+            }
+            return;
+        }
         match key.code {
             KeyCode::Left => self.move_cursor(-1),
             KeyCode::Right => self.move_cursor(1),
@@ -228,11 +264,20 @@ impl App {
             self.error = Some(String::from("bad date: expected YYYY-MM-DD"));
             return;
         }
+        if parse_time_entry(&self.time_buf, now_time()).is_err() {
+            self.error = Some(String::from("bad time: expected HH:MM, 1430, 9, now, +30"));
+            return;
+        }
         if parse_duration(&self.duration).is_err() {
             self.error = Some(String::from("bad duration: expected 45m, 2h, 1h30m"));
             return;
         }
-        crate::debug_log!("tui submit: {} {}", self.date_buf.trim(), self.name.trim());
+        crate::debug_log!(
+            "tui submit: {} {} {}",
+            self.date_buf.trim(),
+            self.time_buf.trim(),
+            self.name.trim()
+        );
         self.done = true;
     }
 
@@ -243,6 +288,7 @@ impl App {
         Some(TuiData {
             name: self.name.trim().to_owned(),
             date: NaiveDate::parse_from_str(self.date_buf.trim(), "%Y-%m-%d").ok()?,
+            time: parse_time_entry(self.time_buf.trim(), now_time()).ok()?,
             duration_raw: self.duration.trim().to_owned(),
             context: self.context.trim().to_owned(),
         })
@@ -301,15 +347,16 @@ fn event_loop(
 }
 
 fn render(frame: &mut ratatui::Frame<'_>, app: &App) {
-    let popup = centered(frame.area(), 64, 22);
+    let popup = centered(frame.area(), 64, 24);
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3),
             Constraint::Length(3),
             Constraint::Length(3),
+            Constraint::Length(3),
             Constraint::Length(7),
-            Constraint::Min(3),
+            Constraint::Min(4),
         ])
         .split(popup);
     render_input(
@@ -331,6 +378,14 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &App) {
     render_input(
         frame,
         rows[2],
+        "time (HH:MM, 1430, 9, now, +30)",
+        app.focus == Field::Time,
+        &app.time_buf,
+        field_cursor(app, Field::Time),
+    );
+    render_input(
+        frame,
+        rows[3],
         "duration (45m, 2h, 1h30m)",
         app.focus == Field::Duration,
         &app.duration,
@@ -338,13 +393,13 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &App) {
     );
     render_input(
         frame,
-        rows[3],
+        rows[4],
         "context",
         app.focus == Field::Context,
         &app.context,
         field_cursor(app, Field::Context),
     );
-    render_footer(frame, rows[4], app.error.as_deref());
+    render_footer(frame, rows[5], app.error.as_deref());
 }
 
 fn field_cursor(app: &App, field: Field) -> Option<usize> {
@@ -409,7 +464,10 @@ fn render_footer(frame: &mut ratatui::Frame<'_>, area: Rect, error: Option<&str>
         lines.push(Line::from(error.to_owned()));
     }
     lines.push(Line::from(
-        "up/down Tab: fields, left/right h/l: day (date), Enter: create, Esc: cancel",
+        "Tab, up/down: fields; Enter: create; Esc: cancel",
+    ));
+    lines.push(Line::from(
+        "date: left/right/h/l: day; time: left/right: 15m; j/k: fields",
     ));
     let style = if error.is_some() {
         Style::default().fg(Color::Red)
@@ -454,6 +512,7 @@ mod tests {
     fn fill_valid(app: &mut App) {
         type_text(app, "Standup");
         app.handle_key(key(KeyCode::Tab)); // Date (leave today as is)
+        app.handle_key(key(KeyCode::Tab)); // Time (prefilled now)
         app.handle_key(key(KeyCode::Tab)); // Duration
         type_text(app, "45m");
         app.handle_key(key(KeyCode::Tab)); // Context
@@ -479,7 +538,13 @@ mod tests {
     #[test]
     fn tab_cycles_all_fields() {
         let mut app = App::new();
-        for expected in [Field::Date, Field::Duration, Field::Context, Field::Name] {
+        for expected in [
+            Field::Date,
+            Field::Time,
+            Field::Duration,
+            Field::Context,
+            Field::Name,
+        ] {
             app.handle_key(key(KeyCode::Tab));
             assert_eq!(app.focus, expected);
         }
@@ -516,7 +581,7 @@ mod tests {
         app.handle_key(key(KeyCode::Tab));
         assert_eq!(app.focus, Field::Date);
         app.handle_key(key(KeyCode::Char('j')));
-        assert_eq!(app.focus, Field::Duration);
+        assert_eq!(app.focus, Field::Time);
         app.handle_key(key(KeyCode::Up));
         assert_eq!(app.focus, Field::Date);
         app.handle_key(key(KeyCode::Char('k')));
@@ -535,6 +600,7 @@ mod tests {
     fn submit_rejects_bad_duration() {
         let mut app = App::new();
         type_text(&mut app, "Standup");
+        app.handle_key(key(KeyCode::Tab));
         app.handle_key(key(KeyCode::Tab));
         app.handle_key(key(KeyCode::Tab));
         type_text(&mut app, "ages");
@@ -564,9 +630,101 @@ mod tests {
     }
 
     #[test]
+    fn render_does_not_panic() {
+        use ratatui::backend::TestBackend;
+        for (width, height) in [(80, 30), (64, 24), (40, 20)] {
+            let backend = TestBackend::new(width, height);
+            let mut terminal = Terminal::new(backend).unwrap();
+            let app = App::new();
+            terminal.draw(|frame| render(frame, &app)).unwrap();
+            let text: String = terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect();
+            assert!(text.contains("time (HH:MM"), "{width}x{height}");
+        }
+    }
+
+    #[test]
     fn ctrl_c_cancels() {
         let mut app = App::new();
         app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
         assert!(app.cancelled);
+    }
+
+    #[test]
+    fn time_prefilled_with_now() {
+        let app = App::new();
+        let parsed = parse_time_entry(&app.time_buf, now_time());
+        assert!(parsed.is_ok());
+    }
+
+    #[test]
+    fn time_arrows_shift_15_minutes() {
+        use chrono::Timelike;
+        let mut app = App::new();
+        app.handle_key(key(KeyCode::Tab));
+        app.handle_key(key(KeyCode::Tab));
+        assert_eq!(app.focus, Field::Time);
+        let before = NaiveTime::parse_from_str(&app.time_buf, "%H:%M")
+            .unwrap()
+            .num_seconds_from_midnight();
+        app.handle_key(key(KeyCode::Right));
+        let after = NaiveTime::parse_from_str(&app.time_buf, "%H:%M")
+            .unwrap()
+            .num_seconds_from_midnight();
+        assert_eq!((after + 86400 - before) % 86400, 900);
+        app.handle_key(key(KeyCode::Left));
+        app.handle_key(key(KeyCode::Left));
+        let back = NaiveTime::parse_from_str(&app.time_buf, "%H:%M")
+            .unwrap()
+            .num_seconds_from_midnight();
+        assert_eq!((before + 86400 - back) % 86400, 900);
+    }
+
+    #[test]
+    fn jk_move_focus_from_time() {
+        let mut app = App::new();
+        app.handle_key(key(KeyCode::Tab));
+        app.handle_key(key(KeyCode::Tab));
+        assert_eq!(app.focus, Field::Time);
+        app.handle_key(key(KeyCode::Char('j')));
+        assert_eq!(app.focus, Field::Duration);
+        app.handle_key(key(KeyCode::Up));
+        assert_eq!(app.focus, Field::Time);
+        app.handle_key(key(KeyCode::Char('k')));
+        assert_eq!(app.focus, Field::Date);
+    }
+
+    #[test]
+    fn submit_rejects_bad_time() {
+        let mut app = App::new();
+        type_text(&mut app, "Standup");
+        app.handle_key(key(KeyCode::Tab));
+        app.handle_key(key(KeyCode::Tab));
+        app.time_buf = String::from("ages");
+        app.handle_key(key(KeyCode::Enter));
+        assert!(!app.done);
+        assert!(app.error.unwrap().contains("bad time"));
+    }
+
+    #[test]
+    fn submit_accepts_smart_time() {
+        let mut app = App::new();
+        type_text(&mut app, "Standup");
+        app.handle_key(key(KeyCode::Tab));
+        app.handle_key(key(KeyCode::Tab));
+        app.time_buf = String::from("930");
+        app.handle_key(key(KeyCode::Tab));
+        type_text(&mut app, "45m");
+        app.handle_key(key(KeyCode::Tab));
+        type_text(&mut app, "Agenda.");
+        app.handle_key(key(KeyCode::Enter));
+        assert!(app.done);
+        let data = app.data().unwrap();
+        assert_eq!(data.time, NaiveTime::from_hms_opt(9, 30, 0).unwrap());
     }
 }

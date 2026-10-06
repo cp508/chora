@@ -1,4 +1,4 @@
-//! Storage layout: `calendar/`, `notes/`, day files.
+//! Storage layout: `events/`, `notes/`, day files.
 //!
 //! No state cache — the state is the files themselves plus git.
 
@@ -25,9 +25,14 @@ impl Store {
         &self.root
     }
 
-    /// The `calendar/` directory.
+    /// The `events/` directory (day files live here).
     #[must_use]
-    pub fn calendar_dir(&self) -> PathBuf {
+    pub fn events_dir(&self) -> PathBuf {
+        self.root.join("events")
+    }
+
+    /// Pre-rename location, moved aside once in [`Self::ensure_layout`].
+    fn calendar_legacy_dir(&self) -> PathBuf {
         self.root.join("calendar")
     }
 
@@ -37,16 +42,31 @@ impl Store {
         self.root.join("notes")
     }
 
-    /// Day file path: strictly ISO `calendar/YYYY-MM-DD.md`.
+    /// Day file path: strictly ISO `events/YYYY-MM-DD.md`.
     #[must_use]
     pub fn day_path(&self, date: NaiveDate) -> PathBuf {
-        self.calendar_dir()
+        self.events_dir()
             .join(format!("{}.md", date.format("%Y-%m-%d")))
     }
 
-    /// Create `calendar/` + `notes/`. Idempotent.
+    /// Create `events/` + `notes/`. Idempotent.
+    ///
+    /// One-time migration: a pre-rename `calendar/` is moved to `events/`
+    /// when `events/` does not exist yet.
     pub fn ensure_layout(&self) -> anyhow::Result<()> {
-        for dir in [self.calendar_dir(), self.notes_dir()] {
+        let legacy = self.calendar_legacy_dir();
+        let events = self.events_dir();
+        if legacy.exists() && !events.exists() {
+            std::fs::rename(&legacy, &events).with_context(|| {
+                format!(
+                    "failed to move {} to {}",
+                    legacy.display(),
+                    events.display()
+                )
+            })?;
+            crate::debug_log!("moved {} to {}", legacy.display(), events.display());
+        }
+        for dir in [events, self.notes_dir()] {
             std::fs::create_dir_all(&dir)
                 .with_context(|| format!("failed to create {}", dir.display()))?;
         }
@@ -127,7 +147,7 @@ mod tests {
     #[test]
     fn day_path_is_iso() {
         let (_tmp, store) = store();
-        assert!(store.day_path(date()).ends_with("calendar/2026-11-20.md"));
+        assert!(store.day_path(date()).ends_with("events/2026-11-20.md"));
     }
 
     #[test]
@@ -155,5 +175,17 @@ mod tests {
         assert!(text.starts_with("# 2026-11-20\n"));
         assert!(text.contains("## A"));
         assert!(text.contains("## B"));
+    }
+
+    #[test]
+    fn ensure_layout_migrates_legacy_calendar() {
+        let tmp = tempfile::tempdir().unwrap();
+        let legacy = tmp.path().join("calendar");
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::write(legacy.join("2026-11-20.md"), "# 2026-11-20\n").unwrap();
+        let store = Store::new(tmp.path().to_path_buf());
+        store.ensure_layout().unwrap();
+        assert!(!legacy.exists());
+        assert!(store.day_path(date()).exists());
     }
 }
