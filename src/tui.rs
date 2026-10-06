@@ -1,6 +1,6 @@
 //! `event --tui`: a minimal event-creation form (ratatui + crossterm).
 //!
-//! Five fields: `name` (-> the `##` title), `date`, `time`, `duration`,
+//! Five fields: `title`, `date`, `time`, `duration`,
 //! `context`. `time` is prefilled with now and accepts `HH:MM`, `HHMM`,
 //! `H`, `now`, `+30` (minutes from now).
 //! `Enter` submits from anywhere (so `context` is single-line input with
@@ -29,8 +29,8 @@ use crate::event::{parse_duration, parse_time_entry, snap_quarter};
 /// Data of a submitted form.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TuiData {
-    /// Event title (becomes `## <name>`).
-    pub name: String,
+    /// Becomes `## <title>`.
+    pub title: String,
     /// Target day file.
     pub date: NaiveDate,
     /// Event time (`Time:`).
@@ -53,7 +53,7 @@ pub enum TuiOutcome {
 /// Form fields in focus order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Field {
-    Name,
+    Title,
     Date,
     Time,
     Duration,
@@ -63,18 +63,18 @@ enum Field {
 impl Field {
     fn next(self) -> Self {
         match self {
-            Self::Name => Self::Date,
+            Self::Title => Self::Date,
             Self::Date => Self::Time,
             Self::Time => Self::Duration,
             Self::Duration => Self::Context,
-            Self::Context => Self::Name,
+            Self::Context => Self::Title,
         }
     }
 
     fn prev(self) -> Self {
         match self {
-            Self::Name => Self::Context,
-            Self::Date => Self::Name,
+            Self::Title => Self::Context,
+            Self::Date => Self::Title,
             Self::Time => Self::Date,
             Self::Duration => Self::Time,
             Self::Context => Self::Duration,
@@ -85,7 +85,7 @@ impl Field {
 /// Form state. The pure part (keys/validation) is unit-tested below.
 struct App {
     focus: Field,
-    name: String,
+    title: String,
     date_buf: String,
     time_buf: String,
     duration: String,
@@ -105,8 +105,8 @@ fn now_time() -> NaiveTime {
 impl App {
     fn new() -> Self {
         Self {
-            focus: Field::Name,
-            name: String::new(),
+            focus: Field::Title,
+            title: String::new(),
             date_buf: today().format("%Y-%m-%d").to_string(),
             time_buf: now_time().format("%H:%M").to_string(),
             duration: String::new(),
@@ -120,7 +120,7 @@ impl App {
 
     fn buf(&self) -> &str {
         match self.focus {
-            Field::Name => &self.name,
+            Field::Title => &self.title,
             Field::Date => &self.date_buf,
             Field::Time => &self.time_buf,
             Field::Duration => &self.duration,
@@ -130,7 +130,7 @@ impl App {
 
     fn buf_mut(&mut self) -> &mut String {
         match self.focus {
-            Field::Name => &mut self.name,
+            Field::Title => &mut self.title,
             Field::Date => &mut self.date_buf,
             Field::Time => &mut self.time_buf,
             Field::Duration => &mut self.duration,
@@ -256,8 +256,8 @@ impl App {
 
     fn submit(&mut self) {
         self.error = None;
-        if self.name.trim().is_empty() {
-            self.error = Some(String::from("name is empty"));
+        if self.title.trim().is_empty() {
+            self.error = Some(String::from("title is empty"));
             return;
         }
         if NaiveDate::parse_from_str(self.date_buf.trim(), "%Y-%m-%d").is_err() {
@@ -276,7 +276,7 @@ impl App {
             "tui submit: {} {} {}",
             self.date_buf.trim(),
             self.time_buf.trim(),
-            self.name.trim()
+            self.title.trim()
         );
         self.done = true;
     }
@@ -286,7 +286,7 @@ impl App {
             return None;
         }
         Some(TuiData {
-            name: self.name.trim().to_owned(),
+            title: self.title.trim().to_owned(),
             date: NaiveDate::parse_from_str(self.date_buf.trim(), "%Y-%m-%d").ok()?,
             time: parse_time_entry(self.time_buf.trim(), now_time()).ok()?,
             duration_raw: self.duration.trim().to_owned(),
@@ -362,10 +362,10 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &App) {
     render_input(
         frame,
         rows[0],
-        "name",
-        app.focus == Field::Name,
-        &app.name,
-        field_cursor(app, Field::Name),
+        "title",
+        app.focus == Field::Title,
+        &app.title,
+        field_cursor(app, Field::Title),
     );
     render_input(
         frame,
@@ -378,7 +378,7 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &App) {
     render_input(
         frame,
         rows[2],
-        "time (HH:MM, 1430, 9, now, +30)",
+        "time (HH:MM)",
         app.focus == Field::Time,
         &app.time_buf,
         field_cursor(app, Field::Time),
@@ -520,19 +520,19 @@ mod tests {
     }
 
     #[test]
-    fn new_starts_on_name_with_today() {
+    fn new_starts_on_title_with_today() {
         let app = App::new();
-        assert_eq!(app.focus, Field::Name);
+        assert_eq!(app.focus, Field::Title);
         assert_eq!(app.date_buf, today().format("%Y-%m-%d").to_string());
     }
 
     #[test]
-    fn typing_and_backspace_in_name() {
+    fn typing_and_backspace_in_title() {
         let mut app = App::new();
         type_text(&mut app, "ab");
         app.handle_key(key(KeyCode::Backspace));
         type_text(&mut app, "c");
-        assert_eq!(app.name, "ac");
+        assert_eq!(app.title, "ac");
     }
 
     #[test]
@@ -543,7 +543,7 @@ mod tests {
             Field::Time,
             Field::Duration,
             Field::Context,
-            Field::Name,
+            Field::Title,
         ] {
             app.handle_key(key(KeyCode::Tab));
             assert_eq!(app.focus, expected);
@@ -556,7 +556,7 @@ mod tests {
         app.handle_key(key(KeyCode::Down));
         assert_eq!(app.focus, Field::Date);
         app.handle_key(key(KeyCode::Up));
-        assert_eq!(app.focus, Field::Name);
+        assert_eq!(app.focus, Field::Title);
     }
 
     #[test]
@@ -585,15 +585,15 @@ mod tests {
         app.handle_key(key(KeyCode::Up));
         assert_eq!(app.focus, Field::Date);
         app.handle_key(key(KeyCode::Char('k')));
-        assert_eq!(app.focus, Field::Name);
+        assert_eq!(app.focus, Field::Title);
     }
 
     #[test]
-    fn submit_rejects_empty_name() {
+    fn submit_rejects_empty_title() {
         let mut app = App::new();
         app.handle_key(key(KeyCode::Enter));
         assert!(!app.done);
-        assert_eq!(app.error.as_deref(), Some("name is empty"));
+        assert_eq!(app.error.as_deref(), Some("title is empty"));
     }
 
     #[test]
@@ -616,7 +616,7 @@ mod tests {
         app.handle_key(key(KeyCode::Enter));
         assert!(app.done);
         let data = app.data().unwrap();
-        assert_eq!(data.name, "Standup");
+        assert_eq!(data.title, "Standup");
         assert_eq!(data.duration_raw, "45m");
         assert_eq!(data.context, "Agenda.");
     }

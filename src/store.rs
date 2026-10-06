@@ -1,58 +1,48 @@
 //! Storage layout: `events/`, `notes/`, day files.
-//!
-//! No state cache — the state is the files themselves plus git.
 
 use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 use chrono::NaiveDate;
 
-/// Storage root (`chora_dir` from the config, or `--dir`).
 pub struct Store {
     root: PathBuf,
 }
 
 impl Store {
-    /// A new store over the root. The root does not need to exist yet.
     #[must_use]
     pub fn new(root: PathBuf) -> Self {
         Self { root }
     }
 
-    /// Storage root.
     #[must_use]
     pub fn root(&self) -> &Path {
         &self.root
     }
 
-    /// The `events/` directory (day files live here).
     #[must_use]
     pub fn events_dir(&self) -> PathBuf {
         self.root.join("events")
     }
 
-    /// Pre-rename location, moved aside once in [`Self::ensure_layout`].
+    /// Old location, moved to `events/` once.
     fn calendar_legacy_dir(&self) -> PathBuf {
         self.root.join("calendar")
     }
 
-    /// The `notes/` directory.
     #[must_use]
     pub fn notes_dir(&self) -> PathBuf {
         self.root.join("notes")
     }
 
-    /// Day file path: strictly ISO `events/YYYY-MM-DD.md`.
+    /// Strictly ISO `events/YYYY-MM-DD.md`.
     #[must_use]
     pub fn day_path(&self, date: NaiveDate) -> PathBuf {
         self.events_dir()
             .join(format!("{}.md", date.format("%Y-%m-%d")))
     }
 
-    /// Create `events/` + `notes/`. Idempotent.
-    ///
-    /// One-time migration: a pre-rename `calendar/` is moved to `events/`
-    /// when `events/` does not exist yet.
+    /// Idempotent. Moves a pre-rename `calendar/` to `events/` once.
     pub fn ensure_layout(&self) -> anyhow::Result<()> {
         let legacy = self.calendar_legacy_dir();
         let events = self.events_dir();
@@ -73,7 +63,7 @@ impl Store {
         Ok(())
     }
 
-    /// `.gitignore` against editor junk. Never touches a user file.
+    /// Creates `.gitignore` unless the user has one.
     pub fn ensure_gitignore(&self) -> anyhow::Result<()> {
         let path = self.root.join(".gitignore");
         if !path.exists() {
@@ -83,13 +73,12 @@ impl Store {
         Ok(())
     }
 
-    /// Empty-day template: a single `# YYYY-MM-DD` header.
     #[must_use]
     pub fn day_template(date: NaiveDate) -> String {
         format!("# {}\n", date.format("%Y-%m-%d"))
     }
 
-    /// Create the day file from the template if missing. Returns the path.
+    /// Creates the day file from the template if missing.
     pub fn ensure_day_file(&self, date: NaiveDate) -> anyhow::Result<PathBuf> {
         let path = self.day_path(date);
         if !path.exists() {
@@ -103,7 +92,7 @@ impl Store {
         Ok(path)
     }
 
-    /// Read the day file. A missing file is an empty day, not an error.
+    /// A missing file is an empty day, not an error.
     pub fn read_day(&self, date: NaiveDate) -> anyhow::Result<String> {
         let path = self.day_path(date);
         match std::fs::read_to_string(&path) {
@@ -113,7 +102,7 @@ impl Store {
         }
     }
 
-    /// Append a section to the end of the day file (created from the template).
+    /// Appends a section; creates the day file first.
     pub fn append_section(&self, date: NaiveDate, section: &str) -> anyhow::Result<()> {
         let path = self.ensure_day_file(date)?;
         let mut text = std::fs::read_to_string(&path)

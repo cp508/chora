@@ -1,7 +1,4 @@
-//! chora — the library of commands.
-//!
-//! The binary in `main.rs` is a thin dispatcher (`proj-lib-main-split`):
-//! all logic lives here, so it can be tested.
+//! chora library. `main.rs` is a thin dispatcher.
 
 pub mod cli;
 pub mod config;

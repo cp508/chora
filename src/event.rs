@@ -1,7 +1,5 @@
-//! Day events: `##`-section parser <-> [`Event`].
-//!
-//! The parser is deliberately lenient: a section without valid
-//! `Time:`/`Duration:` fields is just day text and is skipped, not an error.
+//! Day events: `##` sections <-> [`Event`]. Lenient: sections without
+//! valid `Time:`/`Duration:` are day text, skipped without error.
 
 use std::time::Duration;
 
@@ -9,25 +7,18 @@ use chrono::{NaiveDate, NaiveTime};
 
 use crate::error::ChoraError;
 
-/// One event of a day.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Event {
-    /// The `##` header (= `name` from the TUI).
+    /// The `##` header (= TUI `name`).
     pub title: String,
-    /// Date taken from the file name.
     pub date: NaiveDate,
-    /// `Time: HH:MM`.
     pub time: NaiveTime,
-    /// `Duration:`, normalized to seconds by the parser.
+    /// Seconds, normalized by the parser.
     pub duration: Duration,
-    /// The rest of the section, free form.
     pub context: String,
 }
 
-/// Parse a duration: `10s`, `45m`, `2h`, `1h30m`.
-///
-/// Groups of `<number><s|m|h>` run back to back, at least one is required;
-/// dangling digits and unknown suffixes are an error.
+/// `10s`, `45m`, `2h`, `1h30m`. Groups run back to back, at least one.
 pub fn parse_duration(raw: &str) -> Result<Duration, ChoraError> {
     let bad = || ChoraError::BadDuration(raw.to_owned());
     let text = raw.trim();
@@ -66,7 +57,6 @@ pub fn parse_duration(raw: &str) -> Result<Duration, ChoraError> {
     Ok(Duration::from_secs(total_secs))
 }
 
-/// Compress a duration back to a string: `2h`, `45m`, `10s`, `1h30m`.
 #[must_use]
 pub fn format_duration(duration: Duration) -> String {
     let secs = duration.as_secs();
@@ -84,11 +74,7 @@ pub fn format_duration(duration: Duration) -> String {
     out
 }
 
-/// Parse a TUI time entry against `now`.
-///
-/// Accepted forms: `HH:MM`, `HHMM`, `H`/`HH` (hour sharp), `now`/empty
-/// (keep `now`), `+NN` (NN minutes from now), `+<duration>` (`+1h30m`).
-/// Offsets wrap past midnight.
+/// `HH:MM`, `HHMM`, `H`, `now`/empty, `+NN`, `+<duration>`. Wraps past midnight.
 pub fn parse_time_entry(raw: &str, now: NaiveTime) -> Result<NaiveTime, ChoraError> {
     let bad = || ChoraError::BadTime(raw.to_owned());
     let text = raw.trim();
@@ -129,16 +115,13 @@ pub fn parse_time_entry(raw: &str, now: NaiveTime) -> Result<NaiveTime, ChoraErr
     }
 }
 
-/// Shift a time of day, wrapping past midnight.
 #[must_use]
 pub fn shift_time_of_day(time: NaiveTime, mins: i64) -> NaiveTime {
     time.overflowing_add_signed(chrono::Duration::minutes(mins))
         .0
 }
 
-/// Step to the neighbouring quarter mark (`00`, `15`, `30`, `45`).
-/// Already on a mark: move a full 15 minutes; otherwise snap to the
-/// nearest mark ahead (`forward`) or behind. Wraps past midnight.
+/// Neighbouring `00`/`15`/`30`/`45` mark; full step when already on one.
 #[must_use]
 pub fn snap_quarter(time: NaiveTime, forward: bool) -> NaiveTime {
     use chrono::Timelike;
@@ -155,7 +138,6 @@ pub fn snap_quarter(time: NaiveTime, forward: bool) -> NaiveTime {
         .expect("snapped time is in range")
 }
 
-/// Parse a day file into events. Sections without `Time:` are skipped.
 #[must_use]
 pub fn parse_day(date: NaiveDate, text: &str) -> Vec<Event> {
     let mut events = Vec::new();
@@ -176,7 +158,6 @@ pub fn parse_day(date: NaiveDate, text: &str) -> Vec<Event> {
     events
 }
 
-/// Turn one section into an event when it holds valid fields.
 fn push_section(events: &mut Vec<Event>, date: NaiveDate, title: &str, body: &[&str]) {
     if title.is_empty() {
         return;
@@ -209,7 +190,6 @@ fn push_section(events: &mut Vec<Event>, date: NaiveDate, title: &str, body: &[&
     }
 }
 
-/// Serialize an event into a day-file section.
 #[must_use]
 pub fn render_section(event: &Event) -> String {
     let mut out = String::from("## ");

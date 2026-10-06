@@ -1,18 +1,11 @@
-//! Opener launching: config `editor` > `$EDITOR`, split like a shell line.
-//!
-//! We do not write our own split (`shell-words`): the opener may hold
-//! `code --wait` or `yazi`. `$VISUAL` is ignored on purpose — one source,
-//! less ambiguity. The opener runs with cwd = storage root.
+//! Opener launching: config value > `$EDITOR`, split like a shell line.
 
 use std::path::Path;
 use std::process::Command;
 
 use crate::error::ChoraError;
 
-/// Open `target` in the opener and wait for it to exit.
-///
-/// `configured` is the `editor` value from the config; an empty/absent
-/// value falls back to `$EDITOR`. Empty everywhere is an explicit error.
+/// Open `target` and wait for exit. Empty config and `$EDITOR` is an error.
 pub fn open(target: &Path, cwd: &Path, configured: Option<&str>) -> anyhow::Result<()> {
     let raw = match configured {
         Some(cmd) if !cmd.trim().is_empty() => cmd.to_owned(),

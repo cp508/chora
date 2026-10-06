@@ -59,7 +59,7 @@ fn storage(env: &Env) -> PathBuf {
 }
 
 #[test]
-fn init_bootstraps_and_is_idempotent() {
+fn init_creates_only_config() {
     let env = setup();
     let out = cmd(&env).arg("init").output().unwrap();
     assert!(
@@ -75,25 +75,47 @@ fn init_bootstraps_and_is_idempotent() {
     assert!(text.contains("editor = "));
     assert!(text.contains("open_dirs"));
     assert!(text.contains("remote_url"));
-    assert!(text.contains("editor = "));
-    assert!(text.contains("open_dirs"));
-    assert!(text.contains("remote_url"));
 
+    // The storage appears on first use, not at init.
+    assert!(!storage(&env).exists());
+
+    // Second run is a quiet no-op.
+    let again = cmd(&env).arg("init").output().unwrap();
+    assert!(again.status.success());
+}
+
+#[test]
+fn first_event_bootstraps_storage() {
+    let env = setup();
+    assert!(cmd(&env).arg("init").output().unwrap().status.success());
     let root = storage(&env);
+    assert!(!root.exists());
+
+    let editor = editor_script(&env, "noop.sh", "#!/bin/sh\nexit 0\n");
+    let out = cmd(&env)
+        .env("EDITOR", &editor)
+        .args([
+            "--dir",
+            &root.to_string_lossy(),
+            "event",
+            "--date",
+            "2026-11-20",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert!(root.join("events").is_dir());
     assert!(root.join("notes").is_dir());
     assert!(root.join(".git").is_dir());
     assert!(root.join(".gitignore").exists());
-
-    // Second run must not fail and must not duplicate anything.
-    let again = cmd(&env).arg("init").output().unwrap();
-    assert!(again.status.success());
     assert!(
         git_log(&root)
             .lines()
-            .filter(|line| line.starts_with("init:"))
-            .count()
-            <= 1
+            .any(|line| line.starts_with("event:"))
     );
 }
 
@@ -229,6 +251,8 @@ fn show_missing_day_is_empty() {
         .output()
         .unwrap();
     assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "[]");
+    // Reading creates nothing.
+    assert!(!root.exists());
 }
 
 #[test]
@@ -250,30 +274,6 @@ fn missing_config_points_to_init() {
     let root = storage(&env);
     let out = cmd(&env)
         .args(["--dir", &root.to_string_lossy(), "show", "--date", "today"])
-        .output()
-        .unwrap();
-    assert!(!out.status.success());
-    assert!(String::from_utf8_lossy(&out.stderr).contains("chora init"));
-}
-
-#[test]
-fn event_outside_repo_points_to_init() {
-    let env = setup();
-    assert!(cmd(&env).arg("init").output().unwrap().status.success());
-
-    // A storage dir that was never `init`-ed: friendly error, not git stderr.
-    let plain = env.home.join("plain");
-    std::fs::create_dir_all(&plain).unwrap();
-    let editor = editor_script(&env, "noop.sh", "#!/bin/sh\nexit 0\n");
-    let out = cmd(&env)
-        .env("EDITOR", &editor)
-        .args([
-            "--dir",
-            &plain.to_string_lossy(),
-            "event",
-            "--date",
-            "2026-11-20",
-        ])
         .output()
         .unwrap();
     assert!(!out.status.success());

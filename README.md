@@ -14,14 +14,14 @@ The binary is at `./target/release/chora`. Then:
 chora init && $EDITOR ~/.config/chora/config.toml
 ```
 
-`init` creates the config and the storage (`~/chora/` by default).
-Edit `remote_url` in the config, re-run `chora init`.
+`init` creates the config (`~/chora/` is the default storage).
+Edit the config, then run any command — the storage appears on first use.
 
 ## Commands
 
 Run `chora` with no arguments to see the full tree.
 
-- `init` — bootstrap the config and the storage. No flags.
+- `init` — bootstrap the config. No flags.
 - `open <notes|events>` — open a dir once, commit on exit.
 - `event --date <DATE>` — append an event stub, open the day file.
 - `event --tui [--confirm]` — TUI form for creating an event.

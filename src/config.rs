@@ -1,34 +1,26 @@
-//! `~/.config/chora/config.toml` — the single place for configuration.
-//!
-//! No environment variables. The `--dir` flag overrides `chora_dir`
-//! for one run.
+//! `~/.config/chora/config.toml`. No env vars; `--dir` overrides for one run.
 
 use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 
-/// Root structure of `config.toml`.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct Config {
-    /// The `[main]` section.
     pub main: Main,
 }
 
-/// The `[main]` section: exactly four fields, nothing extra.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Main {
-    /// Storage root. A leading `~/` expands to the home directory.
+    /// `~/` expands to home.
     pub chora_dir: String,
-    /// Opener command for files (day files). Empty string = use $EDITOR.
-    /// Split like a shell line.
+    /// File opener. Empty = $EDITOR.
     #[serde(default)]
     pub editor: String,
-    /// Opener command for directories (`notes/`, `events/`).
-    /// Empty string = use $EDITOR. Split like a shell line.
+    /// Directory opener. Empty = $EDITOR.
     #[serde(default)]
     pub open_dirs: String,
-    /// SSH URL of the remote. Empty string = local-only git.
+    /// Git remote. Empty = local only.
     #[serde(default)]
     pub remote_url: String,
 }
@@ -44,16 +36,14 @@ impl Default for Main {
     }
 }
 
-/// What `ensure_exists` did.
 #[derive(Debug)]
 pub struct Ensured {
-    /// Path to the config file.
     pub path: PathBuf,
-    /// Keys appended under `# NEW` during this run (empty when nothing was missing).
+    /// Keys appended under `# NEW` (empty when nothing was missing).
     pub added: Vec<String>,
 }
 
-/// Default `[main]` keys in canonical order with their default TOML values.
+/// Default `[main]` keys in file order.
 fn known_fields() -> Vec<(&'static str, toml::Value)> {
     let defaults = Main::default();
     vec![
@@ -64,7 +54,7 @@ fn known_fields() -> Vec<(&'static str, toml::Value)> {
     ]
 }
 
-/// One-line comment explaining a key in the generated file.
+/// Comment for a key in the generated file.
 fn field_comment(key: &str) -> Option<&'static str> {
     match key {
         "chora_dir" => Some("# Storage root. A leading ~/ expands to your home directory."),
@@ -79,7 +69,7 @@ fn field_comment(key: &str) -> Option<&'static str> {
     }
 }
 
-/// Fresh config file text: header + commented keys.
+/// Fresh file: header + commented keys.
 fn default_file_text() -> String {
     let mut out = String::from(
         "# chora config. After upgrades, re-run `chora init`: missing keys\n# are appended at the bottom under `# NEW`, your values are kept.\n[main]\n",
@@ -95,19 +85,17 @@ fn default_file_text() -> String {
 }
 
 impl Config {
-    /// Path to the config file (`$HOME/.config/chora/config.toml`).
     #[must_use]
     pub fn path() -> Option<PathBuf> {
         dirs::config_dir().map(|dir| dir.join("chora").join("config.toml"))
     }
 
-    /// Read the config from disk. The file must exist — `init` creates it.
+    /// The file must exist — `init` creates it.
     pub fn load() -> anyhow::Result<Self> {
         let path = Self::path().context("failed to determine the config directory")?;
         Self::load_from(&path)
     }
 
-    /// Read the config from an explicit path (extension point for tests).
     pub fn load_from(path: &Path) -> anyhow::Result<Self> {
         crate::debug_log!("config: {}", path.display());
         let text = match std::fs::read_to_string(path) {
@@ -127,15 +115,12 @@ impl Config {
         Ok(cfg)
     }
 
-    /// Create the config with defaults if missing; append missing keys under
-    /// `# NEW` when the program grew new fields (update path).
-    /// Never touches existing values. Returns the path plus added keys.
+    /// Missing keys are appended under `# NEW`; values are never touched.
     pub fn ensure_exists() -> anyhow::Result<Ensured> {
         let path = Self::path().context("failed to determine the config directory")?;
         Self::ensure_exists_at(&path)
     }
 
-    /// Testable core of [`Self::ensure_exists`] over an explicit path.
     pub fn ensure_exists_at(path: &Path) -> anyhow::Result<Ensured> {
         if !path.exists() {
             if let Some(parent) = path.parent() {
@@ -204,7 +189,7 @@ impl Config {
         })
     }
 
-    /// Storage root: `--dir` > `chora_dir` > `~/chora`.
+    /// `--dir` wins over `chora_dir`.
     #[must_use]
     pub fn root(&self, dir_override: Option<&Path>) -> PathBuf {
         match dir_override {
@@ -214,7 +199,6 @@ impl Config {
     }
 }
 
-/// Expand a leading `~/` to the home directory. Everything else is untouched.
 #[must_use]
 pub fn expand_tilde(raw: &str) -> PathBuf {
     if let Some(rest) = raw.strip_prefix("~/")

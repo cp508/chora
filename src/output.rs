@@ -5,7 +5,6 @@ use serde::Serialize;
 
 use crate::event::{Event, format_duration};
 
-/// One event in the `--json` output.
 #[derive(Debug, Serialize)]
 struct EventJson {
     title: String,
@@ -27,7 +26,6 @@ impl From<&Event> for EventJson {
     }
 }
 
-/// Human-readable rendering of a day.
 #[must_use]
 pub fn plaintext(date: NaiveDate, events: &[Event]) -> String {
     let mut out = format!("# {}\n", date.format("%Y-%m-%d"));
@@ -51,8 +49,7 @@ pub fn plaintext(date: NaiveDate, events: &[Event]) -> String {
     out
 }
 
-/// Machine-readable rendering of a day: an array of
-/// `{title, date, time, duration, context}`.
+/// `--json`: an array of `{title, date, time, duration, context}`.
 pub fn json(events: &[Event]) -> anyhow::Result<String> {
     let items: Vec<EventJson> = events.iter().map(EventJson::from).collect();
     Ok(serde_json::to_string_pretty(&items)?)

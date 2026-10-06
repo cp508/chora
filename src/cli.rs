@@ -12,7 +12,7 @@ use crate::error::ChoraError;
 
 /// Full command tree, printed for bare `chora`.
 pub const HELP_TREE: &str = r#"Commands:
-  init           Bootstrap the config and the storage. Takes no flags.
+  init           Bootstrap the config. Storage appears on first use.
   open           Open a storage dir once in the dirs-opener, commit on exit.
     <notes|events>
                  which directory to open
@@ -141,7 +141,7 @@ pub enum OpenTarget {
 /// chora subcommands.
 #[derive(Debug, Subcommand)]
 pub enum Cmd {
-    /// Bootstrap the config and the storage. No flags — everything comes from the config.
+    /// Bootstrap the config. No flags; storage appears on first use.
     #[command(disable_help_flag = true)]
     Init,
     /// Open a storage dir once in the dirs-opener, commit on exit.
