@@ -128,28 +128,13 @@ fn sync_in_background(store: &Store, dir: Option<&Path>, message: &str) -> anyho
         std::fs::create_dir_all(parent)
             .with_context(|| format!("failed to create {}", parent.display()))?;
     }
-    let open_log = || {
-        std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&log)
-            .with_context(|| format!("failed to open {}", log.display()))
-    };
-    let spawned =
-        spawn_sync_child(&exe, dir, message, store.root(), open_log()?, true).or_else(|err| {
-            if err.kind() == std::io::ErrorKind::NotFound {
-                // No setsid(1): plain orphan spawn, same session.
-                match open_log() {
-                    Ok(retry_log) => {
-                        spawn_sync_child(&exe, dir, message, store.root(), retry_log, false)
-                    }
-                    Err(_) => Err(err),
-                }
-            } else {
-                Err(err)
-            }
-        });
-    match spawned {
+    // Probe: the detached child appends there; fail loudly now if unwritable.
+    let log_file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log)
+        .with_context(|| format!("failed to open {}", log.display()))?;
+    match spawn_sync_child(&exe, dir, message, store.root(), log_file) {
         Ok(_) => {
             println!("syncing in background (log: {})", log.display());
             Ok(())
@@ -161,33 +146,30 @@ fn sync_in_background(store: &Store, dir: Option<&Path>, message: &str) -> anyho
     }
 }
 
-/// One detached `sync-after-open` child. With a new session it outlives
-/// the terminal; without `setsid` it is a plain orphan (same session).
+/// One detached `sync-after-open` child. `process_group(0)` gives it its own
+/// process group at fork time, before `spawn` even returns: closing the foot
+/// window group-kills chora's group, but the child was never in it.
+/// `setsid` inside adds its own session (tty hangup immunity).
+/// No new deps, no waiting.
 fn spawn_sync_child(
     exe: &Path,
     dir: Option<&Path>,
     message: &str,
     root: &Path,
     log_file: std::fs::File,
-    new_session: bool,
 ) -> std::io::Result<std::process::Child> {
-    let mut cmd = if new_session {
-        let mut cmd = std::process::Command::new("setsid");
-        cmd.arg(exe);
-        cmd
-    } else {
-        std::process::Command::new(exe)
-    };
+    use std::os::unix::process::CommandExt;
+    let mut cmd = std::process::Command::new("setsid");
+    cmd.arg(exe);
     if let Some(dir) = dir {
         cmd.arg("--dir").arg(dir);
     }
-    cmd.arg("sync-after-open")
-        .arg("--message")
-        .arg(message)
-        .stdin(std::process::Stdio::null())
+    cmd.arg("sync-after-open").arg("--message").arg(message);
+    cmd.stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(log_file)
         .current_dir(root)
+        .process_group(0)
         .spawn()
 }
 
