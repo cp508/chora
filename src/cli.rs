@@ -173,6 +173,14 @@ pub enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// Finish an `open` in the background: add, commit, push, exit.
+    /// Spawned detached by `Cmd::Open` after the editor closes; not for hands.
+    #[command(hide = true, disable_help_flag = true)]
+    SyncAfterOpen {
+        /// Commit message prepared by the foreground `open`.
+        #[arg(long)]
+        message: String,
+    },
 }
 
 /// Today (local date).
@@ -254,6 +262,21 @@ mod tests {
                 target: OpenTarget::Notes
             })
         ));
+    }
+
+    #[test]
+    fn parses_hidden_sync_after_open() {
+        let cli = Cli::try_parse_from([
+            "chora",
+            "--dir",
+            "/tmp/c",
+            "sync-after-open",
+            "--message",
+            "open: notes",
+        ])
+        .unwrap();
+        assert!(matches!(cli.cmd, Some(Cmd::SyncAfterOpen { .. })));
+        assert_eq!(cli.dir, Some(PathBuf::from("/tmp/c")));
     }
 
     #[test]

@@ -1,7 +1,8 @@
 //! Thin dispatcher; logic lives in the library.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
+use anyhow::Context;
 use chora::cli::{Cli, Cmd, OpenTarget, parse_date_arg, render_help_tree};
 use chora::config::Config;
 use chora::error::ChoraError;
@@ -29,7 +30,7 @@ fn main() -> anyhow::Result<()> {
             // cwd = target: `sh -c '... $(fzf)'` openers scan cwd and ignore
             // the target arg (it lands in $0), so root would show both dirs.
             editor::open(&dir, &dir, dirs_opener(&cfg))?;
-            commit_and_push(&store, &format!("open: {name}"))
+            sync_in_background(&store, cli.dir.as_deref(), &format!("open: {name}"))
         }
         Cmd::Event {
             date,
@@ -57,6 +58,11 @@ fn main() -> anyhow::Result<()> {
                 print!("{}", output::plaintext(day, &events));
             }
             Ok(())
+        }
+        Cmd::SyncAfterOpen { message } => {
+            let (_cfg, store) = load_store(cli.dir.as_deref(), true)?;
+            require_repo(&store)?;
+            commit_and_push(&store, &message)
         }
     }
 }
@@ -100,11 +106,115 @@ fn require_repo(store: &Store) -> anyhow::Result<()> {
 }
 
 fn commit_and_push(store: &Store, message: &str) -> anyhow::Result<()> {
-    git::add_all(store.root())?;
-    if git::commit(store.root(), message)? {
-        git::push(store.root())?;
+    with_sync_lock(store.root(), || {
+        git::add_all(store.root())?;
+        if git::commit(store.root(), message)? {
+            git::push(store.root())?;
+        }
+        Ok(())
+    })
+}
+
+/// Detach the commit+push after `open`: the editor is closed, the shell is
+/// back immediately, and an orphaned copy of this binary finishes the sync
+/// in the background and exits. A new session (`setsid`) means even closing
+/// the terminal does not kill the push: nothing to wait out.
+/// Falls back to a foreground sync when no spawn works, so no edit is ever
+/// lost silently.
+fn sync_in_background(store: &Store, dir: Option<&Path>, message: &str) -> anyhow::Result<()> {
+    let exe = std::env::current_exe().context("failed to locate the chora binary")?;
+    let log = sync_log_path()?;
+    if let Some(parent) = log.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
     }
-    Ok(())
+    let open_log = || {
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log)
+            .with_context(|| format!("failed to open {}", log.display()))
+    };
+    let spawned =
+        spawn_sync_child(&exe, dir, message, store.root(), open_log()?, true).or_else(|err| {
+            if err.kind() == std::io::ErrorKind::NotFound {
+                // No setsid(1): plain orphan spawn, same session.
+                match open_log() {
+                    Ok(retry_log) => {
+                        spawn_sync_child(&exe, dir, message, store.root(), retry_log, false)
+                    }
+                    Err(_) => Err(err),
+                }
+            } else {
+                Err(err)
+            }
+        });
+    match spawned {
+        Ok(_) => {
+            println!("syncing in background (log: {})", log.display());
+            Ok(())
+        }
+        Err(err) => {
+            chora::debug_log!("background sync spawn failed ({err}); syncing in foreground");
+            commit_and_push(store, message)
+        }
+    }
+}
+
+/// One detached `sync-after-open` child. With a new session it outlives
+/// the terminal; without `setsid` it is a plain orphan (same session).
+fn spawn_sync_child(
+    exe: &Path,
+    dir: Option<&Path>,
+    message: &str,
+    root: &Path,
+    log_file: std::fs::File,
+    new_session: bool,
+) -> std::io::Result<std::process::Child> {
+    let mut cmd = if new_session {
+        let mut cmd = std::process::Command::new("setsid");
+        cmd.arg(exe);
+        cmd
+    } else {
+        std::process::Command::new(exe)
+    };
+    if let Some(dir) = dir {
+        cmd.arg("--dir").arg(dir);
+    }
+    cmd.arg("sync-after-open")
+        .arg("--message")
+        .arg(message)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(log_file)
+        .current_dir(root)
+        .spawn()
+}
+
+/// Append-only log for background sync failures. Outside the storage root,
+/// so the sync itself never commits it.
+fn sync_log_path() -> anyhow::Result<PathBuf> {
+    let data = dirs::data_dir().context("failed to determine the data directory")?;
+    Ok(data.join("chora").join("sync.log"))
+}
+
+/// Serialize add/commit/push across concurrent chora processes.
+/// Directory creation is atomic; a stale lock (killed process) times out
+/// instead of blocking forever.
+fn with_sync_lock(root: &Path, sync: impl FnOnce() -> anyhow::Result<()>) -> anyhow::Result<()> {
+    let lock = root.join(".git").join("chora-sync.lock");
+    let mut waited = 0;
+    while std::fs::create_dir(&lock).is_err() {
+        if waited >= 60 {
+            chora::warn_log!("sync lock is stale, proceeding anyway");
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        waited += 1;
+    }
+    let result = sync();
+    let _ = std::fs::remove_dir(&lock);
+    result
 }
 
 /// No flags: everything comes from the config file.

@@ -343,6 +343,29 @@ fn init_migrates_old_config_with_new_marker() {
     assert!(!String::from_utf8_lossy(&out.stdout).contains("new config fields added"));
 }
 
+/// The `open` commit lands from the detached background child,
+/// so poll instead of asserting it right away. A missing HEAD (the child
+/// has not committed yet) counts as "not yet", not as failure.
+fn poll_log(root: &Path, prefix: &str) {
+    for _ in 0..200 {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(["log", "--format=%s"])
+            .output()
+            .unwrap();
+        if out.status.success()
+            && String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .any(|line| line.starts_with(prefix))
+        {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    panic!("background sync never committed '{prefix}'");
+}
+
 #[test]
 fn open_notes_commits_on_exit() {
     let env = setup();
@@ -365,11 +388,37 @@ fn open_notes_commits_on_exit() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(root.join("notes").join("picked.md").exists());
-    assert!(
-        git_log(&root)
-            .lines()
-            .any(|line| line.starts_with("open: notes"))
+    poll_log(&root, "open: notes");
+}
+
+#[test]
+fn open_syncs_in_background_after_exit() {
+    let env = setup();
+    assert!(cmd(&env).arg("init").output().unwrap().status.success());
+
+    let editor = editor_script(
+        &env,
+        "browse.sh",
+        "#!/bin/sh\nprintf '# picked\\n' > \"$1/picked.md\"\n",
     );
+    let root = storage(&env);
+    let out = cmd(&env)
+        .env("EDITOR", &editor)
+        .env_remove("XDG_DATA_HOME")
+        .args(["--dir", &root.to_string_lossy(), "open", "notes"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("syncing in background"),
+        "foreground must detach, not block on push"
+    );
+    poll_log(&root, "open: notes");
+    assert!(root.join("notes").join("picked.md").exists());
 }
 
 #[test]
