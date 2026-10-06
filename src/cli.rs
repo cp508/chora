@@ -13,7 +13,6 @@ use crate::error::ChoraError;
 /// Full command tree, printed for bare `chora`.
 pub const HELP_TREE: &str = r#"Commands:
   init           Bootstrap the config and the storage. Takes no flags.
-  note           Session over notes/: dirs-opener + autocommit ticker.
   open           Open a storage dir once in the dirs-opener, commit on exit.
     <notes|events>
                  which directory to open
@@ -73,9 +72,6 @@ pub enum Cmd {
     /// Bootstrap the config and the storage. No flags — everything comes from the config.
     #[command(disable_help_flag = true)]
     Init,
-    /// Session: open notes/ in the dirs-opener + autocommit every `auto_commit` minutes.
-    #[command(disable_help_flag = true)]
-    Note,
     /// Open a storage dir once in the dirs-opener, commit on exit.
     #[command(disable_help_flag = true)]
     Open {
@@ -104,13 +100,6 @@ pub enum Cmd {
         /// JSON array for scripts.
         #[arg(long)]
         json: bool,
-    },
-    /// Background final commit (spawned detached by `note`, not for humans).
-    #[command(name = "__finalize", hide = true, disable_help_flag = true)]
-    __Finalize {
-        /// Commit message, precomputed by the parent process.
-        #[arg(long)]
-        message: String,
     },
 }
 

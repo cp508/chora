@@ -11,6 +11,5 @@ pub mod event;
 pub mod git;
 pub mod log;
 pub mod output;
-pub mod session;
 pub mod store;
 pub mod tui;

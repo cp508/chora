@@ -128,18 +128,6 @@ pub fn push(dir: &Path) -> anyhow::Result<()> {
     }
 }
 
-/// Synchronous final commit for the detached `__finalize` child.
-/// The commit itself is strict (data is local); the push is best-effort —
-/// offline is normal, the next run will push.
-pub fn finalize(dir: &Path, message: &str) -> anyhow::Result<()> {
-    crate::debug_log!("finalize: {message} in {}", dir.display());
-    add_all(dir)?;
-    if commit(dir, message)? {
-        let _ = push(dir);
-    }
-    Ok(())
-}
-
 /// Timestamp for commit messages: `autocommit: <ISO-timestamp>`.
 #[must_use]
 pub fn stamp_now() -> String {

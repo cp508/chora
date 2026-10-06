@@ -15,13 +15,11 @@ pub struct Config {
     pub main: Main,
 }
 
-/// The `[main]` section: exactly five fields, nothing extra.
+/// The `[main]` section: exactly four fields, nothing extra.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Main {
     /// Storage root. A leading `~/` expands to the home directory.
     pub chora_dir: String,
-    /// `chora note` autocommit interval in minutes. Minimum 1.
-    pub auto_commit: u64,
     /// Opener command for files (day files). Empty string = use $EDITOR.
     /// Split like a shell line.
     #[serde(default)]
@@ -39,7 +37,6 @@ impl Default for Main {
     fn default() -> Self {
         Self {
             chora_dir: String::from("~/chora"),
-            auto_commit: 10,
             editor: String::new(),
             open_dirs: String::new(),
             remote_url: String::new(),
@@ -61,10 +58,6 @@ fn known_fields() -> Vec<(&'static str, toml::Value)> {
     let defaults = Main::default();
     vec![
         ("chora_dir", toml::Value::String(defaults.chora_dir)),
-        (
-            "auto_commit",
-            toml::Value::Integer(defaults.auto_commit as i64),
-        ),
         ("editor", toml::Value::String(defaults.editor)),
         ("open_dirs", toml::Value::String(defaults.open_dirs)),
         ("remote_url", toml::Value::String(defaults.remote_url)),
@@ -75,7 +68,6 @@ fn known_fields() -> Vec<(&'static str, toml::Value)> {
 fn field_comment(key: &str) -> Option<&'static str> {
     match key {
         "chora_dir" => Some("# Storage root. A leading ~/ expands to your home directory."),
-        "auto_commit" => Some("# `chora note` autocommit interval, minutes. Minimum 1."),
         "editor" => Some(
             "# Opener for files (day files). Empty = use $EDITOR. Try \"hx\" or \"code --wait\".",
         ),
@@ -132,7 +124,6 @@ impl Config {
                 path: path.to_path_buf(),
                 msg: err.to_string(),
             })?;
-        cfg.validate(path)?;
         Ok(cfg)
     }
 
@@ -221,33 +212,6 @@ impl Config {
             None => expand_tilde(&self.main.chora_dir),
         }
     }
-
-    /// Autocommit interval as a `Duration`. Zero is rejected (protects
-    /// the ticker from a busy loop even if the config was built by hand
-    /// past `validate`).
-    pub fn every(&self) -> anyhow::Result<std::time::Duration> {
-        if self.main.auto_commit == 0 {
-            anyhow::bail!("auto_commit must be >= 1 (minutes)");
-        }
-        let secs = self
-            .main
-            .auto_commit
-            .checked_mul(60)
-            .context("auto_commit is too large")?;
-        Ok(std::time::Duration::from_secs(secs))
-    }
-
-    /// Config invariants. Runs on every load — fail fast.
-    fn validate(&self, path: &Path) -> anyhow::Result<()> {
-        if self.main.auto_commit == 0 {
-            return Err(crate::error::ChoraError::ConfigInvalid {
-                path: path.to_path_buf(),
-                msg: String::from("auto_commit must be >= 1 (minutes)"),
-            }
-            .into());
-        }
-        Ok(())
-    }
 }
 
 /// Expand a leading `~/` to the home directory. Everything else is untouched.
@@ -269,23 +233,9 @@ mod tests {
     fn defaults_match_concept() {
         let cfg = Config::default();
         assert_eq!(cfg.main.chora_dir, "~/chora");
-        assert_eq!(cfg.main.auto_commit, 10);
         assert!(cfg.main.editor.is_empty());
         assert!(cfg.main.open_dirs.is_empty());
         assert!(cfg.main.remote_url.is_empty());
-    }
-
-    #[test]
-    fn every_converts_minutes_to_duration() {
-        let cfg = Config::default();
-        assert_eq!(cfg.every().unwrap(), std::time::Duration::from_secs(600));
-    }
-
-    #[test]
-    fn every_rejects_zero() {
-        let mut cfg = Config::default();
-        cfg.main.auto_commit = 0;
-        assert!(cfg.every().is_err());
     }
 
     #[test]
@@ -307,7 +257,7 @@ mod tests {
         std::fs::write(&path, text).unwrap();
         let cfg = Config::load_from(&path).unwrap();
         assert_eq!(cfg.main.chora_dir, "/tmp/c");
-        assert_eq!(cfg.main.auto_commit, 5);
+        // Unknown keys from older versions are ignored.
         assert_eq!(cfg.main.editor, "yazi");
         assert!(cfg.main.open_dirs.is_empty());
         assert_eq!(cfg.main.remote_url, "ssh://vps/x");
@@ -331,14 +281,6 @@ mod tests {
     }
 
     #[test]
-    fn load_from_rejects_zero_auto_commit() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.toml");
-        std::fs::write(&path, "[main]\nchora_dir = \"/tmp/c\"\nauto_commit = 0\n").unwrap();
-        assert!(Config::load_from(&path).is_err());
-    }
-
-    #[test]
     fn load_from_rejects_garbage() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
@@ -354,7 +296,6 @@ mod tests {
         assert!(ensured.added.is_empty());
         let cfg = Config::load_from(&path).unwrap();
         assert_eq!(cfg.main.chora_dir, "~/chora");
-        assert_eq!(cfg.main.auto_commit, 10);
         assert!(cfg.main.editor.is_empty());
         assert!(cfg.main.open_dirs.is_empty());
         assert!(cfg.main.remote_url.is_empty());
@@ -379,7 +320,6 @@ mod tests {
         assert!(text.contains("remote_url = \"\""));
         let cfg = Config::load_from(&path).unwrap();
         assert_eq!(cfg.main.chora_dir, "/tmp/keep");
-        assert_eq!(cfg.main.auto_commit, 3);
     }
 
     #[test]

@@ -6,7 +6,7 @@ use chora::cli::{Cli, Cmd, HELP_TREE, OpenTarget, parse_date_arg};
 use chora::config::Config;
 use chora::error::ChoraError;
 use chora::store::Store;
-use chora::{editor, event, git, output, session, tui};
+use chora::{editor, event, git, output, tui};
 use clap::Parser;
 
 fn main() -> anyhow::Result<()> {
@@ -19,16 +19,6 @@ fn main() -> anyhow::Result<()> {
     };
     match cmd {
         Cmd::Init => cmd_init(),
-        Cmd::Note => {
-            let (cfg, store) = load_store(cli.dir.as_deref())?;
-            require_repo(&store)?;
-            session::run(
-                store.root(),
-                &store.notes_dir(),
-                cfg.every()?,
-                dirs_opener(&cfg),
-            )
-        }
         Cmd::Open { target } => {
             let (cfg, store) = load_store(cli.dir.as_deref())?;
             require_repo(&store)?;
@@ -65,11 +55,6 @@ fn main() -> anyhow::Result<()> {
                 print!("{}", output::plaintext(day, &events));
             }
             Ok(())
-        }
-        Cmd::__Finalize { message } => {
-            let (_cfg, store) = load_store(cli.dir.as_deref())?;
-            require_repo(&store)?;
-            git::finalize(store.root(), &message)
         }
     }
 }

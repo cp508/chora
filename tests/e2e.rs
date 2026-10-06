@@ -72,7 +72,9 @@ fn init_bootstraps_and_is_idempotent() {
     assert!(cfg.exists());
     let text = std::fs::read_to_string(&cfg).unwrap();
     assert!(text.contains("chora_dir"));
-    assert!(text.contains("auto_commit"));
+    assert!(text.contains("editor = "));
+    assert!(text.contains("open_dirs"));
+    assert!(text.contains("remote_url"));
     assert!(text.contains("editor = "));
     assert!(text.contains("open_dirs"));
     assert!(text.contains("remote_url"));
@@ -160,45 +162,6 @@ fn event_then_show_roundtrip() {
     assert_eq!(parsed[0]["time"], "10:00");
     assert_eq!(parsed[0]["duration"], "1h");
     assert_eq!(parsed[0]["context"], "Agenda.");
-}
-
-#[test]
-fn note_session_edits_and_final_commits() {
-    let env = setup();
-    assert!(cmd(&env).arg("init").output().unwrap().status.success());
-
-    let editor = editor_script(
-        &env,
-        "note.sh",
-        "#!/bin/sh\nprintf '# hi\\n' > \"$1/hi.md\"\n",
-    );
-    let root = storage(&env);
-    let out = cmd(&env)
-        .env("EDITOR", &editor)
-        .args(["--dir", &root.to_string_lossy(), "note"])
-        .output()
-        .unwrap();
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-
-    assert!(root.join("notes").join("hi.md").exists());
-    let log = wait_for_log(&root, "final:");
-    assert!(log.lines().any(|line| line.starts_with("final:")), "{log}");
-}
-
-/// The final commit of `note` lands in the background: poll for it.
-fn wait_for_log(root: &Path, prefix: &str) -> String {
-    for _ in 0..100 {
-        let log = git_log(root);
-        if log.lines().any(|line| line.starts_with(prefix)) {
-            return log;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(100));
-    }
-    panic!("timed out waiting for a commit starting with {prefix}");
 }
 
 #[test]
@@ -318,7 +281,7 @@ fn event_outside_repo_points_to_init() {
 }
 
 #[test]
-fn note_uses_config_dirs_opener() {
+fn open_uses_config_dirs_opener() {
     let env = setup();
     assert!(cmd(&env).arg("init").output().unwrap().status.success());
 
@@ -327,7 +290,7 @@ fn note_uses_config_dirs_opener() {
     std::fs::write(&script, "#!/bin/sh\nprintf '# hi\\n' > \"$1/hi.md\"\n").unwrap();
     let cfg = env.home.join(".config").join("chora").join("config.toml");
     let text = format!(
-        "[main]\nchora_dir = \"~/chora\"\nauto_commit = 10\neditor = \"\"\nopen_dirs = \"sh {}\"\nremote_url = \"\"\n",
+        "[main]\nchora_dir = \"~/chora\"\neditor = \"\"\nopen_dirs = \"sh {}\"\nremote_url = \"\"\n",
         script.display()
     );
     std::fs::write(&cfg, text).unwrap();
@@ -335,7 +298,7 @@ fn note_uses_config_dirs_opener() {
     let root = storage(&env);
     let out = cmd(&env)
         .env_remove("EDITOR")
-        .args(["--dir", &root.to_string_lossy(), "note"])
+        .args(["--dir", &root.to_string_lossy(), "open", "notes"])
         .output()
         .unwrap();
     assert!(
