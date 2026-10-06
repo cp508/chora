@@ -17,3 +17,7 @@ debug:
 # build release
 release:
     cargo build --release
+
+# move release to /usr/bin
+install_local: release
+    sudo cp -f ./target/release/chora /usr/bin/chora
