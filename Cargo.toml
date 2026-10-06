@@ -1,0 +1,30 @@
+[package]
+name = "chora"
+version = "0.1.0"
+edition = "2024"
+description = "Лёгкий CLI-органайзер: markdown-заметки, календарь, git-синк"
+license = "MIT"
+
+[[bin]]
+name = "chora"
+path = "src/main.rs"
+
+[lib]
+name = "chora"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = "1"
+chrono = "0.4"
+clap = { version = "4", features = ["derive"] }
+crossterm = "0.28"
+dirs = "5"
+ratatui = "0.29"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+shell-words = "1"
+thiserror = "2"
+toml = "0.8"
+
+[dev-dependencies]
+tempfile = "3"
