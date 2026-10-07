@@ -375,16 +375,13 @@ pub enum Cmd {
         #[command(subcommand)]
         target: OpenTarget,
     },
-    /// Day events.
+    /// Day events: TUI form by default, `show` to display.
     #[command(disable_help_flag = true)]
     Event {
         /// Append an event stub to the date file and open it in the file opener.
         #[arg(long, value_name = "DATE", value_hint = clap::ValueHint::Other)]
         date: Option<String>,
-        /// TUI form for creating an event.
-        #[arg(long)]
-        tui: bool,
-        /// After the TUI, open the day file in the file opener right away.
+        /// After submit, open the day file in the file opener right away.
         #[arg(long)]
         confirm: bool,
         #[command(subcommand)]
@@ -677,17 +674,30 @@ mod tests {
     }
 
     #[test]
-    fn parses_event_tui_confirm() {
-        let cli = Cli::try_parse_from(["chora", "event", "--tui", "--confirm"]).unwrap();
+    fn parses_bare_event_as_tui_with_confirm() {
+        let cli = Cli::try_parse_from(["chora", "event", "--confirm"]).unwrap();
         assert!(matches!(
             cli.cmd,
             Some(Cmd::Event {
-                tui: true,
                 confirm: true,
                 date: None,
                 action: None
             })
         ));
+        let cli = Cli::try_parse_from(["chora", "event"]).unwrap();
+        assert!(matches!(
+            cli.cmd,
+            Some(Cmd::Event {
+                confirm: false,
+                date: None,
+                action: None
+            })
+        ));
+    }
+
+    #[test]
+    fn event_rejects_removed_tui_flag() {
+        assert!(Cli::try_parse_from(["chora", "event", "--tui"]).is_err());
     }
 
     #[test]

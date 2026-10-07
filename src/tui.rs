@@ -1,4 +1,4 @@
-//! `event --tui`: a minimal event-creation form (ratatui + crossterm).
+//! Bare `event`: a minimal event-creation form (ratatui + crossterm).
 //!
 //! Five fields: `title`, `date`, `time`, `duration`,
 //! `context`. `date` must be today or later and well-formed: otherwise

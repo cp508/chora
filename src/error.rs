@@ -41,12 +41,6 @@ pub enum ChoraError {
     #[error("bad time `{0}`: expected HH:MM|HHMM|H|now|+30")]
     BadTime(String),
 
-    #[error("need --date <date> or --tui")]
-    EventNeedsTarget,
-
-    #[error("pass either --date or --tui, not both")]
-    EventExclusiveTarget,
-
-    #[error("pass either --date/--tui or `show`, not both")]
+    #[error("pass either --date/--confirm or `show`, not both")]
     EventExclusiveAction,
 }

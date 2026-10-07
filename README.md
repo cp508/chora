@@ -34,7 +34,7 @@ Bare `chora` prints the whole tree.
 - `init` — bootstrap the config. No flags, never touches the storage.
 - `open <note|event>` — open a directory in the dirs-opener. On exit, in the background: pull (rebase), commit, push. The shell is back instantly, the log is `sync.log` (see below).
 - `event --date <DATE>` — append an event stub to the day file and open it in the file opener. Sync runs in the background after closing.
-- `event --tui [--confirm]` — TUI form for creating an event. With `--confirm`, opens the day file after submit.
+- `event [--confirm]` — TUI form for creating an event. With `--confirm`, opens the day file after submit.
 - `event show [--date <DATE>] [--json]` — show events: one day plus its repeatables with `--date`, all days in a row without. `--json` prints an array for scripts.
 - `completion <bash|fish>` — print shell completions to stdout.
 

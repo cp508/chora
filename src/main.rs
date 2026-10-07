@@ -67,11 +67,10 @@ fn main() -> anyhow::Result<()> {
         }
         Cmd::Event {
             date,
-            tui: use_tui,
             confirm,
             action,
         } => {
-            let creating = date.is_some() || use_tui || confirm;
+            let creating = date.is_some() || confirm;
             match action {
                 Some(_) if creating => Err(ChoraError::EventExclusiveAction.into()),
                 // Read-only: showing never creates storage or needs a repo.
@@ -83,15 +82,11 @@ fn main() -> anyhow::Result<()> {
                     let (cfg, store) = load_store(cli.dir.as_deref(), true)?;
                     require_repo(&store)?;
                     let open = files_opener(&cfg);
-                    match (date, use_tui) {
-                        (Some(_), true) => Err(ChoraError::EventExclusiveTarget.into()),
-                        (None, false) => Err(ChoraError::EventNeedsTarget.into()),
-                        (Some(raw), false) => {
-                            cmd_event_stub(&store, &cfg, &raw, open, cli.dir.as_deref())
-                        }
-                        (None, true) => {
-                            cmd_event_tui(&store, &cfg, confirm, open, cli.dir.as_deref())
-                        }
+                    match date {
+                        Some(raw) => cmd_event_stub(&store, &cfg, &raw, open, cli.dir.as_deref()),
+                        // Bare `event` is the TUI form; `--confirm` opens
+                        // the day file after submit.
+                        None => cmd_event_tui(&store, &cfg, confirm, open, cli.dir.as_deref()),
                     }
                 }
             }
