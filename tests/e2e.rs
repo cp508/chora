@@ -272,6 +272,19 @@ fn bad_date_fails() {
 }
 
 #[test]
+fn invalid_subcommand_shows_tree() {
+    let env = setup();
+    let out = cmd(&env).arg("bogus").output().unwrap();
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    // Same tree as bare `chora`, then the clap error.
+    for token in ["Commands:", "• init", "• open", "• event", "Options:"] {
+        assert!(stderr.contains(token), "stderr misses `{token}`");
+    }
+    assert!(stderr.contains("bogus"));
+}
+
+#[test]
 fn missing_config_points_to_init() {
     let env = setup();
     let root = storage(&env);

@@ -22,7 +22,21 @@ fn main() -> anyhow::Result<()> {
     if let Some(shell) = chora::cli::take_completion(std::env::args_os().skip(1)) {
         return cmd_completion(shell);
     }
-    let cli = Cli::parse();
+    // Invalid input shows the same tree as bare `chora`, then the error.
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(err) => {
+            use clap::error::ErrorKind;
+            if matches!(
+                err.kind(),
+                ErrorKind::DisplayHelp | ErrorKind::DisplayVersion
+            ) {
+                err.exit();
+            }
+            eprint!("{}", chora::cli::render_help_tree_for_stderr());
+            err.exit();
+        }
+    };
     chora::log::init(cli.debug);
     chora::debug_log!("debug logging on");
     let Some(cmd) = cli.cmd else {

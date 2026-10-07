@@ -1,113 +1,308 @@
 //! Clap declaration of the CLI: one command — one job.
 //!
-//! Help flags are disabled on purpose: bare `chora` prints [`HELP_TREE`].
+//! Help flags are disabled on purpose: bare `chora` prints the tree from
+//! [`render_help_tree`], built dynamically from the clap schema below.
 
 use std::path::PathBuf;
 
 use anyhow::Context;
 use chrono::NaiveDate;
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 
 use crate::error::ChoraError;
 
-/// Full command tree, printed for bare `chora`.
-pub const HELP_TREE: &str = r#"Commands:
-  init           Bootstrap the config. Storage appears on first use.
-  open           Open a storage dir once, sync on exit.
-    <note|event>
-                 which directory to open
-  event          Day events.
-    --date <DATE>
-                 append a stub to the day file and open it in the file opener
-    --tui
-                 TUI form for creating an event
-    --confirm
-                 with --tui: open the day file after submit
-    show
-                 show events: one day with --date, all days without
-      --date <DATE>
-                 which day to show (default: all days)
-      --json
-                 print a JSON array for scripts
-  completion     Print shell completions to stdout.
-    <bash|fish>
-                 which shell to complete
-Options:
-  --dir <PATH>   override chora_dir for one run
-  --debug        verbose internals on stderr
-<DATE> is today, tomorrow, YYYY-MM-DD, or DD.MM.YYYY.
-Openers: `editor` for files, `open_dirs` for directories, $EDITOR when empty.
-"#;
+/// Static footnotes: not part of the clap schema.
+const ANNOTATION: [&str; 2] = [
+    "<DATE> is today, tomorrow, YYYY-MM-DD, or DD.MM.YYYY.",
+    "Openers: `editor` for files, `open_dirs` for directories, $EDITOR when empty.",
+];
 
-/// Nesting colors for the tree: headers, level-1 commands, level-2 args.
+/// One tree row: a command (blue, bold) or an argument (green).
+/// `prefix` already holds the box-drawing guides and is never painted.
+struct Row {
+    prefix: String,
+    command: bool,
+    head: String,
+    about: String,
+}
+
+fn about_of(cmd: &clap::Command) -> String {
+    cmd.get_about()
+        .map(|text| text.to_string())
+        .unwrap_or_default()
+}
+
+/// `--date <DATE>`, `--tui`, or `<VALUES>` for positionals.
+/// `get_value_names()` reports defaults even for flags without values,
+/// so only `Set`/`Append` actions render `<NAME>`.
+fn arg_head(arg: &clap::Arg) -> String {
+    let takes_value = matches!(
+        arg.get_action(),
+        clap::ArgAction::Set | clap::ArgAction::Append
+    );
+    let values: Vec<String> = if takes_value {
+        arg.get_value_names()
+            .iter()
+            .flat_map(|names| names.iter())
+            .map(|name| name.to_string())
+            .collect()
+    } else {
+        Vec::new()
+    };
+    match arg.get_long() {
+        Some(long) => match values.first() {
+            Some(name) => format!("--{long} <{name}>"),
+            None => format!("--{long}"),
+        },
+        None if values.is_empty() => arg.get_id().to_string(),
+        None => format!("<{}>", values.join("|")),
+    }
+}
+
+fn arg_about(arg: &clap::Arg) -> String {
+    arg.get_help()
+        .map(|text| text.to_string())
+        .unwrap_or_default()
+}
+
+fn visible_arg(arg: &clap::Arg) -> bool {
+    !arg.is_hide_set() && !matches!(arg.get_long(), Some("help" | "version"))
+}
+
+fn branch(last: bool) -> &'static str {
+    if last { "└── " } else { "├── " }
+}
+
+/// Flags first, then nested subcommands — mirrors the `event` layout.
+/// `guides` carries the ancestors' `│` bars; the last sibling closes them.
+fn push_children(cmd: &clap::Command, guides: &str, rows: &mut Vec<Row>) {
+    let args: Vec<_> = cmd.get_arguments().filter(|arg| visible_arg(arg)).collect();
+    let subs: Vec<_> = cmd.get_subcommands().collect();
+    let total = args.len() + subs.len();
+    for (index, arg) in args.iter().enumerate() {
+        rows.push(Row {
+            prefix: format!("{guides}{}", branch(index + 1 == total)),
+            command: false,
+            head: arg_head(arg),
+            about: arg_about(arg),
+        });
+    }
+    for (index, sub) in subs.iter().enumerate() {
+        let last = index + 1 == subs.len();
+        rows.push(Row {
+            prefix: format!("{guides}{}", branch(last)),
+            command: true,
+            head: sub.get_name().to_owned(),
+            about: about_of(sub),
+        });
+        let child_guides = format!("{guides}{}", if last { "    " } else { "│   " });
+        push_children(sub, &child_guides, rows);
+    }
+}
+
+/// The whole tree: schema subcommands plus the hand-parsed `completion`
+/// (outside the clap schema, but still user-facing).
+fn build_rows() -> Vec<Row> {
+    let mut rows = Vec::new();
+    for sub in Cli::command().get_subcommands() {
+        rows.push(Row {
+            prefix: String::from("  • "),
+            command: true,
+            head: sub.get_name().to_owned(),
+            about: about_of(sub),
+        });
+        push_children(sub, "  ", &mut rows);
+    }
+    rows.push(Row {
+        prefix: String::from("  · "),
+        command: true,
+        head: String::from("completion"),
+        about: String::from("print shell completions to stdout"),
+    });
+    rows.push(Row {
+        prefix: String::from("  └── "),
+        command: false,
+        head: String::from("<bash|fish>"),
+        about: String::from("which shell to complete"),
+    });
+    rows
+}
+
+/// Global flags for the `Options:` section.
+fn global_options() -> Vec<Row> {
+    Cli::command()
+        .get_arguments()
+        .filter(|arg| visible_arg(arg))
+        .map(|arg| Row {
+            prefix: String::from("  "),
+            command: false,
+            head: arg_head(arg),
+            about: arg_about(arg),
+        })
+        .collect()
+}
+
+fn row_line(row: &Row) -> String {
+    if row.about.is_empty() {
+        format!("{}{}", row.prefix, row.head)
+    } else {
+        format!("{}{} - {}", row.prefix, row.head, row.about)
+    }
+}
+
+/// Headers: `Commands:`, `Annotation:`, `Options:`. Footnotes stay dim.
 fn header_style() -> anstyle::Style {
     anstyle::Style::new()
         .bold()
         .fg_color(Some(anstyle::Color::Ansi(anstyle::AnsiColor::Yellow)))
 }
 
+/// Commands: bold blue.
 fn command_style() -> anstyle::Style {
     anstyle::Style::new()
         .bold()
-        .fg_color(Some(anstyle::Color::Ansi(anstyle::AnsiColor::Green)))
+        .fg_color(Some(anstyle::Color::Ansi(anstyle::AnsiColor::Blue)))
 }
 
+/// Arguments: plain green.
 fn arg_style() -> anstyle::Style {
-    anstyle::Style::new().fg_color(Some(anstyle::Color::Ansi(anstyle::AnsiColor::Cyan)))
+    anstyle::Style::new().fg_color(Some(anstyle::Color::Ansi(anstyle::AnsiColor::Green)))
 }
 
 fn dim_style() -> anstyle::Style {
     anstyle::Style::new().dimmed()
 }
 
+/// Placeholders like `<DATE>`: gray.
+fn gray_style() -> anstyle::Style {
+    anstyle::Style::new().fg_color(Some(anstyle::Color::Ansi(anstyle::AnsiColor::BrightBlack)))
+}
+
 fn paint(style: anstyle::Style, text: &str) -> String {
     format!("{style}{text}{style:#}")
 }
 
-/// Paint one tree line by its nesting level. Descriptions keep the base color.
-fn style_line(line: &str) -> String {
-    if line.trim().is_empty() {
-        return line.to_owned();
-    }
-    let indent = line.len() - line.trim_start().len();
-    if indent == 0 {
-        if line.ends_with(':') {
-            return paint(header_style(), line);
+/// Paint a head: `<...>` placeholders go gray, the rest keeps the row style.
+fn paint_head(head: &str, base: anstyle::Style) -> String {
+    let mut out = String::new();
+    let mut rest = head;
+    while let Some(start) = rest.find('<') {
+        let (plain, tail) = rest.split_at(start);
+        if !plain.is_empty() {
+            out.push_str(&paint(base, plain));
         }
-        return paint(dim_style(), line);
+        match tail.find('>') {
+            Some(end) => {
+                let (placeholder, after) = tail.split_at(end + 1);
+                out.push_str(&paint(gray_style(), placeholder));
+                rest = after;
+            }
+            None => {
+                out.push_str(&paint(base, tail));
+                rest = "";
+            }
+        }
     }
-    let trimmed = line.trim_start();
-    let pad = &line[..line.len() - trimmed.len()];
-    let end = trimmed.find(char::is_whitespace).unwrap_or(trimmed.len());
-    let (head, tail) = (&trimmed[..end], &trimmed[end..]);
-    let style = if indent == 2 {
-        command_style()
-    } else if indent == 4 {
-        arg_style()
-    } else {
-        return paint(dim_style(), line);
-    };
-    format!("{pad}{}{tail}", paint(style, head))
+    if !rest.is_empty() {
+        out.push_str(&paint(base, rest));
+    }
+    out
 }
 
-/// The tree with nesting colors. Pure: always paints.
-fn colorize_tree(text: &str) -> String {
-    text.lines().map(style_line).collect::<Vec<_>>().join("\n") + "\n"
+/// Plain text, no colors. Pure: the single source for tests and pipes.
+fn help_text_plain() -> String {
+    let cmd = Cli::command();
+    let mut out = format!("{} - {}\n", cmd.get_name(), about_of(&cmd));
+    out.push_str("\nCommands:\n");
+    for row in build_rows() {
+        out.push_str(&row_line(&row));
+        out.push('\n');
+    }
+    out.push_str("\nAnnotation:\n");
+    for line in ANNOTATION {
+        out.push_str(line);
+        out.push('\n');
+    }
+    out.push_str("\nOptions:\n");
+    for row in global_options() {
+        out.push_str(&row_line(&row));
+        out.push('\n');
+    }
+    out
+}
+
+/// Paint one row: guides stay plain, the head keeps its style
+/// with gray `<...>` placeholders.
+fn paint_row(row: &Row, style: anstyle::Style) -> String {
+    let line = row_line(row);
+    let head_start = line.find(&row.head).unwrap_or(0);
+    let mut out = String::from(&line[..head_start]);
+    out.push_str(&paint_head(&row.head, style));
+    out.push_str(&line[head_start + row.head.len()..]);
+    out
+}
+
+/// Same text with colors: headers yellow, commands blue bold, args green.
+fn help_text_colored() -> String {
+    let cmd = Cli::command();
+    let mut out = format!(
+        "{} - {}\n",
+        paint(command_style(), cmd.get_name()),
+        about_of(&cmd)
+    );
+    out.push('\n');
+    out.push_str(&paint(header_style(), "Commands:"));
+    out.push('\n');
+    for row in build_rows() {
+        let style = if row.command {
+            command_style()
+        } else {
+            arg_style()
+        };
+        out.push_str(&paint_row(&row, style));
+        out.push('\n');
+    }
+    out.push('\n');
+    out.push_str(&paint(header_style(), "Annotation:"));
+    out.push('\n');
+    for line in ANNOTATION {
+        out.push_str(&paint(dim_style(), line));
+        out.push('\n');
+    }
+    out.push('\n');
+    out.push_str(&paint(header_style(), "Options:"));
+    out.push('\n');
+    for row in global_options() {
+        out.push_str(&paint_row(&row, arg_style()));
+        out.push('\n');
+    }
+    out
 }
 
 /// Colors only for a live terminal; pipes and `NO_COLOR` stay plain.
-fn use_color() -> bool {
-    use std::io::IsTerminal;
-    std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none()
+fn use_color(stream_is_terminal: bool) -> bool {
+    stream_is_terminal && std::env::var_os("NO_COLOR").is_none()
 }
 
 /// The tree for bare `chora`: colored on a terminal, plain otherwise.
 #[must_use]
 pub fn render_help_tree() -> String {
-    if use_color() {
-        colorize_tree(HELP_TREE)
+    use std::io::IsTerminal;
+    if use_color(std::io::stdout().is_terminal()) {
+        help_text_colored()
     } else {
-        HELP_TREE.to_owned()
+        help_text_plain()
+    }
+}
+
+/// Same tree for parse errors (stderr): colored on a terminal, plain otherwise.
+#[must_use]
+pub fn render_help_tree_for_stderr() -> String {
+    use std::io::IsTerminal;
+    if use_color(std::io::stderr().is_terminal()) {
+        help_text_colored()
+    } else {
+        help_text_plain()
     }
 }
 
@@ -116,7 +311,7 @@ pub fn render_help_tree() -> String {
 #[command(
     name = "chora",
     version,
-    about = "Lightweight CLI organizer: markdown, events, git sync",
+    about = "lightweight CLI organizer: markdown notes, day events, git sync. No daemons.",
     disable_help_flag = true,
     disable_help_subcommand = true
 )]
@@ -301,24 +496,45 @@ mod tests {
     }
 
     #[test]
-    fn tree_coloring_survives_ansi_strip() {
-        let colored = colorize_tree(HELP_TREE);
-        assert!(colored.contains("\u{1b}["));
-        assert_eq!(strip_ansi(&colored), HELP_TREE);
+    fn tree_lists_every_schema_subcommand() {
+        fn collect(cmd: &clap::Command, names: &mut Vec<String>) {
+            for sub in cmd.get_subcommands() {
+                names.push(sub.get_name().to_owned());
+                collect(sub, names);
+            }
+        }
+        let mut names = Vec::new();
+        collect(&Cli::command(), &mut names);
+        assert!(!names.is_empty());
+        let plain = help_text_plain();
+        for name in names {
+            assert!(plain.contains(&name), "tree misses `{name}`");
+        }
+        // Hand-parsed, outside the schema — still shown.
+        for token in ["completion", "<bash|fish>", "--dir <PATH>", "--debug"] {
+            assert!(plain.contains(token), "tree misses `{token}`");
+        }
     }
 
     #[test]
-    fn tree_paints_nesting_levels() {
-        let out = colorize_tree("Commands:\n  init           Bootstrap.\n    --date <DATE>\n");
-        let mut lines = out.lines();
-        let header = lines.next().unwrap();
-        assert!(header.starts_with("\u{1b}["));
-        assert!(header.ends_with("\u{1b}[0m"));
-        let cmd = lines.next().unwrap();
-        assert!(cmd.starts_with("  \u{1b}["));
-        let arg = lines.next().unwrap();
-        assert!(arg.starts_with("    \u{1b}["));
-        assert_ne!(cmd, arg);
+    fn tree_paints_commands_blue_bold_and_args_green() {
+        let colored = help_text_colored();
+        // Bold blue command, plain green argument, gray placeholder.
+        assert!(colored.contains("\u{1b}[1m\u{1b}[34minit"));
+        assert!(colored.contains("\u{1b}[32m--date "));
+        assert!(colored.contains("\u{1b}[90m<DATE>"));
+        assert_eq!(strip_ansi(&colored), help_text_plain());
+    }
+
+    #[test]
+    fn tree_has_title_annotation_and_options() {
+        let plain = help_text_plain();
+        let mut lines = plain.lines();
+        assert!(lines.next().unwrap().starts_with("chora - "));
+        assert!(plain.contains("\nCommands:\n"));
+        assert!(plain.contains("\nAnnotation:\n"));
+        assert!(plain.contains("\nOptions:\n"));
+        assert!(plain.contains("<DATE> is today"));
     }
 
     #[test]
