@@ -1,5 +1,6 @@
 //! chora library. `main.rs` is a thin dispatcher.
 
+pub mod calendar;
 pub mod cli;
 pub mod config;
 pub mod editor;

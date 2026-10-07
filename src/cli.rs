@@ -417,6 +417,9 @@ pub enum Cmd {
         #[command(subcommand)]
         action: Option<EventAction>,
     },
+    /// Month calendar with event markers. Read-only.
+    #[command(disable_help_flag = true)]
+    Calendar,
 }
 
 /// `chora completion|completions <bash|fish>`, parsed by hand (not a clap
@@ -562,6 +565,13 @@ mod tests {
         assert!(plain.contains("\nAnnotation:\n"));
         assert!(plain.contains("\nOptions:\n"));
         assert!(plain.contains("<DATE> is today"));
+        // Breathing room between command groups.
+        for name in ["open", "event", "calendar", "completion"] {
+            assert!(
+                plain.contains(&format!("\n\n  • {name}")),
+                "no blank line before `{name}`"
+            );
+        }
     }
 
     #[test]
@@ -580,6 +590,12 @@ mod tests {
         for name in names {
             assert!(README.contains(&name), "README misses `{name}`");
         }
+    }
+
+    #[test]
+    fn parses_calendar() {
+        let cli = Cli::try_parse_from(["chora", "calendar"]).unwrap();
+        assert!(matches!(cli.cmd, Some(Cmd::Calendar)));
     }
 
     #[test]

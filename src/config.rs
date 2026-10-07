@@ -8,6 +8,61 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct Config {
     pub main: Main,
+    /// Missing `[calendar]` table falls back to defaults, key by key.
+    #[serde(default)]
+    pub calendar: Calendar,
+}
+
+/// Calendar display settings. Terminal palette only, no RGB.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct Calendar {
+    /// Color for events recorded on that date.
+    #[serde(default = "default_day_color")]
+    pub day_color: String,
+    /// Color for weekday repeatables.
+    #[serde(default = "default_repeat_color")]
+    pub repeat_color: String,
+    /// Whether repeatables are marked on the calendar at all.
+    #[serde(default = "default_show_repeat")]
+    pub show_repeat: bool,
+    /// `strftime` format of the selected date, top-left of the calendar.
+    #[serde(default = "default_header")]
+    pub header: String,
+    /// Today hint, top-right, only when looking at another date.
+    #[serde(default = "default_show_today")]
+    pub show_today: bool,
+}
+
+fn default_day_color() -> String {
+    String::from("green")
+}
+
+fn default_repeat_color() -> String {
+    String::from("blue")
+}
+
+fn default_show_repeat() -> bool {
+    true
+}
+
+fn default_header() -> String {
+    String::from("%A, %d.%m.%Y")
+}
+
+fn default_show_today() -> bool {
+    true
+}
+
+impl Default for Calendar {
+    fn default() -> Self {
+        Self {
+            day_color: default_day_color(),
+            repeat_color: default_repeat_color(),
+            show_repeat: default_show_repeat(),
+            header: default_header(),
+            show_today: default_show_today(),
+        }
+    }
 }
 
 /// What to do with day files older than today on every event action.
@@ -75,23 +130,35 @@ pub struct Ensured {
     pub added: Vec<String>,
 }
 
-/// Default `[main]` keys in file order.
-fn known_fields() -> Vec<(&'static str, toml::Value)> {
-    let defaults = Main::default();
-    vec![
-        ("chora_dir", toml::Value::String(defaults.chora_dir)),
-        ("editor", toml::Value::String(defaults.editor)),
-        ("open_dirs", toml::Value::String(defaults.open_dirs)),
-        (
-            "auto_commit",
-            toml::Value::Integer(defaults.auto_commit as i64),
-        ),
-        (
-            "manage_old_event",
-            toml::Value::String(defaults.manage_old_event.as_str().to_owned()),
-        ),
-        ("remote_url", toml::Value::String(defaults.remote_url)),
-    ]
+/// Display order of `[main]` keys in fresh files. Detection never uses
+/// this: missing keys are derived from the serialized defaults below,
+/// so a new struct field migrates even if nobody touches this list.
+const MAIN_ORDER: [&str; 6] = [
+    "chora_dir",
+    "editor",
+    "open_dirs",
+    "auto_commit",
+    "manage_old_event",
+    "remote_url",
+];
+
+/// Display order of `[calendar]` keys in fresh files. Same contract.
+const CALENDAR_ORDER: [&str; 5] = [
+    "day_color",
+    "repeat_color",
+    "show_repeat",
+    "header",
+    "show_today",
+];
+
+/// Serialize the defaults: the single source for migration detection
+/// and appended values. A new `#[serde(default)]` field is picked up
+/// automatically — no list to forget.
+fn defaults_table(defaults: &impl serde::Serialize) -> anyhow::Result<toml::Table> {
+    match toml::Value::try_from(defaults) {
+        Ok(toml::Value::Table(table)) => Ok(table),
+        _ => anyhow::bail!("defaults do not serialize to a table"),
+    }
 }
 
 /// Comment for a key in the generated file.
@@ -107,6 +174,17 @@ fn field_comment(key: &str) -> Option<&'static str> {
         "auto_commit" => Some(
             "# Auto-commit while the editor is open, in minutes. 0 = off. Local commits only; the push happens on exit.",
         ),
+        "day_color" => Some(
+            "# Color for events recorded on that date. Terminal palette: black, red, green, yellow, blue, magenta, cyan, white, gray, darkgray, lightred, lightgreen, lightyellow, lightblue, lightmagenta, lightcyan.",
+        ),
+        "repeat_color" => Some("# Color for weekday repeatables. Same palette as day_color."),
+        "show_repeat" => {
+            Some("# Mark weekday repeatables on the calendar. false = day events only.")
+        }
+        "header" => Some(
+            "# strftime format of the selected date, top-left of the calendar. NONE hides the header row.",
+        ),
+        "show_today" => Some("# Today hint, top-right, only when looking at another date."),
         "manage_old_event" => Some(
             "# Passed day files (before today) on every event action: delete, backlog (= move to events/backlog/), or nothing.",
         ),
@@ -116,18 +194,36 @@ fn field_comment(key: &str) -> Option<&'static str> {
 }
 
 /// Fresh file: header + commented keys.
-fn default_file_text() -> String {
+fn default_file_text() -> anyhow::Result<String> {
+    let main_defaults = defaults_table(&Main::default())?;
+    let calendar_defaults = defaults_table(&Calendar::default())?;
     let mut out = String::from(
         "# chora config. After upgrades, re-run `chora init`: missing keys\n# are appended at the bottom under `# NEW`, your values are kept.\n[main]\n",
     );
-    for (key, value) in known_fields() {
+    for key in MAIN_ORDER {
+        let value = main_defaults
+            .get(key)
+            .cloned()
+            .unwrap_or(toml::Value::String(String::new()));
         if let Some(comment) = field_comment(key) {
             out.push_str(comment);
             out.push('\n');
         }
         out.push_str(&format!("{key} = {value}\n"));
     }
-    out
+    out.push_str("[calendar]\n");
+    for key in CALENDAR_ORDER {
+        let value = calendar_defaults
+            .get(key)
+            .cloned()
+            .unwrap_or(toml::Value::String(String::new()));
+        if let Some(comment) = field_comment(key) {
+            out.push_str(comment);
+            out.push('\n');
+        }
+        out.push_str(&format!("{key} = {value}\n"));
+    }
+    Ok(out)
 }
 
 impl Config {
@@ -173,7 +269,7 @@ impl Config {
                 std::fs::create_dir_all(parent)
                     .with_context(|| format!("failed to create {}", parent.display()))?;
             }
-            let text = default_file_text();
+            let text = default_file_text()?;
             std::fs::write(path, text)
                 .with_context(|| format!("failed to write {}", path.display()))?;
             return Ok(Ensured {
@@ -193,17 +289,51 @@ impl Config {
                 });
             }
         };
-        let has_main = table.contains_key("main");
-        let present: Vec<String> = table
+        let main_present: Vec<String> = table
             .get("main")
             .and_then(|main| main.as_table())
             .map(|main| main.keys().cloned().collect())
             .unwrap_or_default();
-        let missing: Vec<(&str, toml::Value)> = known_fields()
-            .into_iter()
-            .filter(|(key, _)| !present.iter().any(|got| got == key))
+        let calendar_present: Vec<String> = table
+            .get("calendar")
+            .and_then(|calendar| calendar.as_table())
+            .map(|calendar| calendar.keys().cloned().collect())
+            .unwrap_or_default();
+        let main_defaults = defaults_table(&Main::default())?;
+        let calendar_defaults = defaults_table(&Calendar::default())?;
+        // Derived from the serialized defaults: a new `#[serde(default)]`
+        // field migrates with no list to update. `*_ORDER` is display-only.
+        let main_missing: Vec<(String, toml::Value)> = main_defaults
+            .iter()
+            .filter(|(key, _)| !main_present.iter().any(|got| got == *key))
+            .map(|(key, value)| (key.clone(), value.clone()))
             .collect();
-        if missing.is_empty() {
+        let calendar_missing: Vec<(String, toml::Value)> = calendar_defaults
+            .iter()
+            .filter(|(key, _)| !calendar_present.iter().any(|got| got == *key))
+            .map(|(key, default)| {
+                // Carry over values from the retired `[main]` keys so
+                // custom colors survive the move to `[calendar]`.
+                let legacy = match key.as_str() {
+                    "day_color" => table
+                        .get("main")
+                        .and_then(|main| main.as_table())
+                        .and_then(|main| main.get("calendar_day_color"))
+                        .cloned(),
+                    "repeat_color" => table
+                        .get("main")
+                        .and_then(|main| main.as_table())
+                        .and_then(|main| main.get("calendar_repeat_color"))
+                        .cloned(),
+                    _ => None,
+                };
+                (
+                    format!("calendar.{key}"),
+                    legacy.unwrap_or_else(|| default.clone()),
+                )
+            })
+            .collect();
+        if main_missing.is_empty() && calendar_missing.is_empty() {
             return Ok(Ensured {
                 path: path.to_path_buf(),
                 added: Vec::new(),
@@ -214,18 +344,35 @@ impl Config {
             out.push('\n');
         }
         out.push('\n');
-        if !has_main {
-            out.push_str("[main]\n");
-        }
-        out.push_str("# NEW\n");
         let mut added = Vec::new();
-        for (key, value) in &missing {
-            if let Some(comment) = field_comment(key) {
-                out.push_str(comment);
-                out.push('\n');
+        if !main_missing.is_empty() {
+            if !table.contains_key("main") {
+                out.push_str("[main]\n");
             }
-            out.push_str(&format!("{key} = {value}\n"));
-            added.push((*key).to_owned());
+            out.push_str("# NEW\n");
+            for (key, value) in &main_missing {
+                if let Some(comment) = field_comment(key) {
+                    out.push_str(comment);
+                    out.push('\n');
+                }
+                out.push_str(&format!("{key} = {value}\n"));
+                added.push(key.clone());
+            }
+        }
+        if !calendar_missing.is_empty() {
+            if !table.contains_key("calendar") {
+                out.push_str("[calendar]\n");
+            }
+            out.push_str("# NEW\n");
+            for (qualified, value) in &calendar_missing {
+                let key = qualified.strip_prefix("calendar.").unwrap_or(qualified);
+                if let Some(comment) = field_comment(key) {
+                    out.push_str(comment);
+                    out.push('\n');
+                }
+                out.push_str(&format!("{key} = {value}\n"));
+                added.push(qualified.clone());
+            }
         }
         std::fs::write(path, &out)
             .with_context(|| format!("failed to write {}", path.display()))?;
@@ -260,12 +407,35 @@ mod tests {
     use super::*;
 
     #[test]
+    fn field_order_covers_all_defaults() {
+        // Display order is manual, detection is derived: this test keeps
+        // them in sync, so no key is ever missing from fresh files.
+        let mut main_keys: Vec<&str> = MAIN_ORDER.to_vec();
+        main_keys.sort_unstable();
+        let main_table = defaults_table(&Main::default()).unwrap();
+        let mut main_defaults: Vec<&str> = main_table.keys().map(String::as_str).collect();
+        main_defaults.sort_unstable();
+        assert_eq!(main_keys, main_defaults);
+        let mut calendar_keys: Vec<&str> = CALENDAR_ORDER.to_vec();
+        calendar_keys.sort_unstable();
+        let calendar_table = defaults_table(&Calendar::default()).unwrap();
+        let mut calendar_defaults: Vec<&str> = calendar_table.keys().map(String::as_str).collect();
+        calendar_defaults.sort_unstable();
+        assert_eq!(calendar_keys, calendar_defaults);
+    }
+
+    #[test]
     fn defaults_match_concept() {
         let cfg = Config::default();
         assert_eq!(cfg.main.chora_dir, "~/chora");
         assert!(cfg.main.editor.is_empty());
         assert!(cfg.main.open_dirs.is_empty());
         assert_eq!(cfg.main.auto_commit, 0);
+        assert_eq!(cfg.calendar.day_color, "green");
+        assert_eq!(cfg.calendar.repeat_color, "blue");
+        assert!(cfg.calendar.show_repeat);
+        assert_eq!(cfg.calendar.header, "%A, %d.%m.%Y");
+        assert!(cfg.calendar.show_today);
         assert_eq!(cfg.main.manage_old_event, OldEventPolicy::Nothing);
         assert!(cfg.main.remote_url.is_empty());
     }
@@ -377,6 +547,11 @@ mod tests {
         assert!(cfg.main.editor.is_empty());
         assert!(cfg.main.open_dirs.is_empty());
         assert_eq!(cfg.main.auto_commit, 0);
+        assert_eq!(cfg.calendar.day_color, "green");
+        assert_eq!(cfg.calendar.repeat_color, "blue");
+        assert!(cfg.calendar.show_repeat);
+        assert_eq!(cfg.calendar.header, "%A, %d.%m.%Y");
+        assert!(cfg.calendar.show_today);
         assert_eq!(cfg.main.manage_old_event, OldEventPolicy::Nothing);
         assert!(cfg.main.remote_url.is_empty());
     }
@@ -387,25 +562,44 @@ mod tests {
         let path = dir.path().join("config.toml");
         std::fs::write(
             &path,
-            "# my old config\n[main]\nchora_dir = \"/tmp/keep\"\nauto_commit = 3\n",
+            "# my old config\n[main]\nchora_dir = \"/tmp/keep\"\nauto_commit = 3\ncalendar_day_color = \"magenta\"\n",
         )
         .unwrap();
         let ensured = Config::ensure_exists_at(&path).unwrap();
+        // Derived order is alphabetical within each table.
         assert_eq!(
             ensured.added,
-            vec!["editor", "open_dirs", "manage_old_event", "remote_url"]
+            vec![
+                "editor",
+                "manage_old_event",
+                "open_dirs",
+                "remote_url",
+                "calendar.day_color",
+                "calendar.header",
+                "calendar.repeat_color",
+                "calendar.show_repeat",
+                "calendar.show_today"
+            ]
         );
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.contains("# my old config"));
         assert!(text.contains("# NEW\n"));
         assert!(text.contains("editor = \"\""));
         assert!(text.contains("open_dirs = \"\""));
+        assert!(text.contains("[calendar]\n"));
+        assert!(text.contains("show_repeat = true"));
         assert!(text.contains("manage_old_event = \"nothing\""));
         assert!(text.contains("remote_url = \"\""));
         let cfg = Config::load_from(&path).unwrap();
         assert_eq!(cfg.main.chora_dir, "/tmp/keep");
         // Legacy value survives the migration untouched.
         assert_eq!(cfg.main.auto_commit, 3);
+        // Retired [main] colors move to [calendar] with values kept.
+        assert_eq!(cfg.calendar.day_color, "magenta");
+        assert_eq!(cfg.calendar.repeat_color, "blue");
+        assert!(cfg.calendar.show_repeat);
+        assert_eq!(cfg.calendar.header, "%A, %d.%m.%Y");
+        assert!(cfg.calendar.show_today);
     }
 
     #[test]
@@ -414,7 +608,7 @@ mod tests {
         let path = dir.path().join("config.toml");
         std::fs::write(
             &path,
-            "[main]\nchora_dir = \"/tmp/c\"\nauto_commit = 5\neditor = \"yazi\"\nopen_dirs = \"yazi\"\nmanage_old_event = \"nothing\"\nremote_url = \"\"\n",
+            "[main]\nchora_dir = \"/tmp/c\"\nauto_commit = 5\neditor = \"yazi\"\nopen_dirs = \"yazi\"\nmanage_old_event = \"nothing\"\nremote_url = \"\"\n[calendar]\nday_color = \"green\"\nrepeat_color = \"blue\"\nshow_repeat = true\nheader = \"%A, %d.%m.%Y\"\nshow_today = true\n",
         )
         .unwrap();
         let before = std::fs::read_to_string(&path).unwrap();

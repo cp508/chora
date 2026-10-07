@@ -9,7 +9,7 @@ use chora::cli::{
 use chora::config::{Config, OldEventPolicy};
 use chora::error::ChoraError;
 use chora::store::Store;
-use chora::{editor, event, git, output, sync, tui};
+use chora::{calendar, editor, event, git, output, sync, tui};
 use clap::Parser;
 
 fn main() -> anyhow::Result<()> {
@@ -64,6 +64,10 @@ fn main() -> anyhow::Result<()> {
                 editor::open(&dir, &dir, dirs_opener(&cfg))
             })?;
             sync_in_background(&store, cli.dir.as_deref(), &format!("open: {name}"))
+        }
+        Cmd::Calendar => {
+            let (cfg, store) = load_store(cli.dir.as_deref(), false)?;
+            cmd_calendar(&store, &cfg, cli.dir.as_deref())
         }
         Cmd::Event {
             date,
@@ -259,6 +263,35 @@ fn cmd_init() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Read-only month calendar. Showing never creates storage or needs a repo;
+/// unknown colors fail fast with the config path attached. `Enter` opens
+/// the selected day exactly like `event --date` (stub, editor, background
+/// sync) — that path bootstraps the store and needs a repo.
+fn cmd_calendar(store: &Store, cfg: &Config, dir: Option<&Path>) -> anyhow::Result<()> {
+    let path = Config::path().unwrap_or_else(|| store.root().join("config.toml"));
+    let day = calendar::parse_color(&cfg.calendar.day_color).map_err(|msg| {
+        ChoraError::ConfigInvalid {
+            path: path.clone(),
+            msg,
+        }
+    })?;
+    let repeat = calendar::parse_color(&cfg.calendar.repeat_color)
+        .map_err(|msg| ChoraError::ConfigInvalid { path, msg })?;
+    let options = calendar::Options {
+        day_color: day,
+        repeat_color: repeat,
+        show_repeat: cfg.calendar.show_repeat,
+        header: cfg.calendar.header.clone(),
+        show_today: cfg.calendar.show_today,
+    };
+    let Some(date) = calendar::run(store.root(), options)? else {
+        return Ok(());
+    };
+    let (cfg, store) = load_store(dir, true)?;
+    require_repo(&store)?;
+    open_day_file(&store, &cfg, date, files_opener(&cfg), dir)
+}
+
 /// Read-only show: one day (plus its repeatables) or all days.
 /// Showing never creates storage, needs no repo, and touches no network.
 fn cmd_event_show(store: &Store, raw: Option<&str>, json: bool) -> anyhow::Result<()> {
@@ -307,6 +340,18 @@ fn cmd_event_stub(
     dir: Option<&Path>,
 ) -> anyhow::Result<()> {
     let day = parse_date_arg(raw)?;
+    open_day_file(store, cfg, day, open, dir)
+}
+
+/// Append a stub to the day file and open it in the file opener.
+/// Shared by `event --date` and calendar `Enter`.
+fn open_day_file(
+    store: &Store,
+    cfg: &Config,
+    day: chrono::NaiveDate,
+    open: Option<&str>,
+    dir: Option<&Path>,
+) -> anyhow::Result<()> {
     // No network up here: the opener must start instantly. Fresh remote
     // work merges in the detached child on exit (rebase heals fast-forwards;
     // real conflicts land loudly in `sync.log`).

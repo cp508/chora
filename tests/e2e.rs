@@ -358,6 +358,9 @@ fn init_migrates_old_config_with_new_marker() {
     assert!(text.contains("# NEW\n"));
     assert!(text.contains("editor = \"\""));
     assert!(text.contains("open_dirs = \"\""));
+    assert!(text.contains("[calendar]\n"));
+    assert!(text.contains("day_color = \"green\""));
+    assert!(text.contains("show_repeat = true"));
     assert!(text.contains("manage_old_event = \"nothing\""));
     assert!(text.contains("remote_url = \"\""));
 

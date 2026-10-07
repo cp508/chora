@@ -36,6 +36,7 @@ Bare `chora` prints the whole tree.
 - `event --date <DATE>` — append an event stub to the day file and open it in the file opener. Sync runs in the background after closing.
 - `event [--confirm]` — TUI form for creating an event. With `--confirm`, opens the day file after submit.
 - `event show [--date <DATE>] [--json]` — show events: one day plus its repeatables with `--date`, all days in a row without. `--json` prints an array for scripts.
+- `calendar` — read-only month grid with event markers. Arrows/hjkl move, Enter opens the day, `t` jumps to today, `q` quits. Day-file events use `[calendar] day_color`, weekday repeatables use `repeat_color` (unless `show_repeat = false`).
 - `completion <bash|fish>` — print shell completions to stdout.
 
 `<DATE>` is `today`, `tomorrow`, `YYYY-MM-DD`, or `DD.MM.YYYY` (e.g. `20.05.2026`).
@@ -85,6 +86,13 @@ open_dirs = ""   # opener for directories, e.g. "yazi", "sh -c 'nvim $(fzf)'". E
 auto_commit = 0  # auto-commit while the editor is open, in minutes. 0 = off. Local "auto: ..." commits only; the push happens on exit.
 manage_old_event = "nothing"  # old day files on every event action: delete, backlog (= into events/backlog/), nothing.
 remote_url = ""  # SSH remote. Empty = local-only git.
+
+[calendar]
+day_color = "green"  # color for events recorded on that date. Terminal palette: black, red, green, yellow, blue, magenta, cyan, white, gray, darkgray, lightred, lightgreen, lightyellow, lightblue, lightmagenta, lightcyan.
+repeat_color = "blue"  # color for weekday repeatables. Same palette.
+show_repeat = true  # mark weekday repeatables on the calendar. false = day events only.
+header = "%A, %d.%m.%Y"  # strftime format of the selected date, top-left of the calendar. NONE hides the header row.
+show_today = true  # today hint, top-right, only when looking at another date.
 ```
 
 After upgrades, re-run `chora init`: missing keys are appended at the bottom under `# NEW`, your values are kept.
