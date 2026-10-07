@@ -36,12 +36,15 @@ Bare `chora` prints the whole tree.
 - `event --date <DATE>` — append an event stub to the day file and open it in the file opener. Sync runs in the background after closing.
 - `event --tui [--confirm]` — TUI form for creating an event. With `--confirm`, opens the day file after submit.
 - `event show [--date <DATE>] [--json]` — show events: one day plus its repeatables with `--date`, all days in a row without. `--json` prints an array for scripts.
+- `completion <bash|fish>` — print shell completions to stdout.
 
 `<DATE>` is `today`, `tomorrow`, `YYYY-MM-DD`, or `DD.MM.YYYY` (e.g. `20.05.2026`).
 
 ### Event format
 
-Only sections like this are parsed (see `example/`):
+Only sections like this are parsed (`example/` mirrors the storage layout:
+`example/events/2026-11-20.md`, `example/events/repeatable/monday.md`,
+`example/notes/vacation.md`):
 
 ```md
 ## Title
