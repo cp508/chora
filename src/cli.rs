@@ -19,9 +19,11 @@ const ANNOTATION: [&str; 2] = [
 
 /// One tree row: a command (blue, bold) or an argument (green).
 /// `prefix` already holds the box-drawing guides and is never painted.
+/// `new_group` starts a blank line before top-level commands.
 struct Row {
     prefix: String,
     command: bool,
+    new_group: bool,
     head: String,
     about: String,
 }
@@ -83,6 +85,7 @@ fn push_children(cmd: &clap::Command, guides: &str, rows: &mut Vec<Row>) {
         rows.push(Row {
             prefix: format!("{guides}{}", branch(index + 1 == total)),
             command: false,
+            new_group: false,
             head: arg_head(arg),
             about: arg_about(arg),
         });
@@ -92,6 +95,7 @@ fn push_children(cmd: &clap::Command, guides: &str, rows: &mut Vec<Row>) {
         rows.push(Row {
             prefix: format!("{guides}{}", branch(last)),
             command: true,
+            new_group: false,
             head: sub.get_name().to_owned(),
             about: about_of(sub),
         });
@@ -108,21 +112,29 @@ fn build_rows() -> Vec<Row> {
         rows.push(Row {
             prefix: String::from("  • "),
             command: true,
+            new_group: true,
             head: sub.get_name().to_owned(),
             about: about_of(sub),
         });
         push_children(sub, "  ", &mut rows);
     }
     rows.push(Row {
-        prefix: String::from("  · "),
+        prefix: String::from("  • "),
         command: true,
+        new_group: true,
         head: String::from("completion"),
         about: String::from("print shell completions to stdout"),
     });
+    let shells = COMPLETION_SHELLS
+        .iter()
+        .map(|(name, _)| *name)
+        .collect::<Vec<_>>()
+        .join("|");
     rows.push(Row {
         prefix: String::from("  └── "),
         command: false,
-        head: String::from("<bash|fish>"),
+        new_group: false,
+        head: format!("<{shells}>"),
         about: String::from("which shell to complete"),
     });
     rows
@@ -136,6 +148,7 @@ fn global_options() -> Vec<Row> {
         .map(|arg| Row {
             prefix: String::from("  "),
             command: false,
+            new_group: false,
             head: arg_head(arg),
             about: arg_about(arg),
         })
@@ -214,7 +227,12 @@ fn help_text_plain() -> String {
     let cmd = Cli::command();
     let mut out = format!("{} - {}\n", cmd.get_name(), about_of(&cmd));
     out.push_str("\nCommands:\n");
+    let mut first_group = true;
     for row in build_rows() {
+        if row.new_group && !first_group {
+            out.push('\n');
+        }
+        first_group = false;
         out.push_str(&row_line(&row));
         out.push('\n');
     }
@@ -253,7 +271,12 @@ fn help_text_colored() -> String {
     out.push('\n');
     out.push_str(&paint(header_style(), "Commands:"));
     out.push('\n');
+    let mut first_group = true;
     for row in build_rows() {
+        if row.new_group && !first_group {
+            out.push('\n');
+        }
+        first_group = false;
         let style = if row.command {
             command_style()
         } else {
@@ -362,6 +385,13 @@ pub enum CompletionShell {
     Fish,
 }
 
+/// Single source for the shell names: the hand parser and the tree below
+/// both read this, so they cannot drift apart.
+const COMPLETION_SHELLS: [(&str, CompletionShell); 2] = [
+    ("bash", CompletionShell::Bash),
+    ("fish", CompletionShell::Fish),
+];
+
 /// chora subcommands.
 #[derive(Debug, Subcommand)]
 pub enum Cmd {
@@ -405,11 +435,11 @@ pub fn take_completion(
     {
         return None;
     }
-    match shell.as_os_str().to_str()? {
-        "bash" => Some(CompletionShell::Bash),
-        "fish" => Some(CompletionShell::Fish),
-        _ => None,
-    }
+    let shell = shell.as_os_str().to_str()?;
+    COMPLETION_SHELLS
+        .iter()
+        .find(|(known, _)| *known == shell)
+        .map(|(_, parsed)| *parsed)
 }
 
 /// Internal background child, built by `spawn_sync_child`:
@@ -532,6 +562,24 @@ mod tests {
         assert!(plain.contains("\nAnnotation:\n"));
         assert!(plain.contains("\nOptions:\n"));
         assert!(plain.contains("<DATE> is today"));
+    }
+
+    #[test]
+    fn readme_lists_every_command() {
+        const README: &str = include_str!("../README.md");
+        fn collect(cmd: &clap::Command, names: &mut Vec<String>) {
+            for sub in cmd.get_subcommands() {
+                names.push(sub.get_name().to_owned());
+                collect(sub, names);
+            }
+        }
+        // `completion` is hand-parsed outside the schema, but documented.
+        let mut names = vec![String::from("completion")];
+        collect(&Cli::command(), &mut names);
+        assert!(!names.is_empty());
+        for name in names {
+            assert!(README.contains(&name), "README misses `{name}`");
+        }
     }
 
     #[test]
