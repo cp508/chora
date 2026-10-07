@@ -52,17 +52,6 @@ fn editor_script(env: &Env, name: &str, body: &str) -> String {
     format!("sh {}", path.display())
 }
 
-fn git_log(root: &Path) -> String {
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(root)
-        .args(["log", "--format=%s"])
-        .output()
-        .unwrap();
-    assert!(out.status.success());
-    String::from_utf8_lossy(&out.stdout).into_owned()
-}
-
 fn storage(env: &Env) -> PathBuf {
     env.home.join("chora")
 }
@@ -121,11 +110,8 @@ fn first_event_bootstraps_storage() {
     assert!(root.join("notes").is_dir());
     assert!(root.join(".git").is_dir());
     assert!(root.join(".gitignore").exists());
-    assert!(
-        git_log(&root)
-            .lines()
-            .any(|line| line.starts_with("event:"))
-    );
+    // The commit lands from the detached background child.
+    poll_log(&root, "event:");
 }
 
 #[test]
@@ -165,6 +151,7 @@ fn event_then_show_roundtrip() {
         .args([
             "--dir",
             &root.to_string_lossy(),
+            "event",
             "show",
             "--date",
             "2026-11-20",
@@ -179,6 +166,7 @@ fn event_then_show_roundtrip() {
         .args([
             "--dir",
             &root.to_string_lossy(),
+            "event",
             "show",
             "--date",
             "2026-11-20",
@@ -222,11 +210,8 @@ fn event_stub_appends_template_and_commits() {
     let day = std::fs::read_to_string(root.join("events").join("2026-11-21.md")).unwrap();
     assert!(day.contains("Time:"));
     assert!(day.contains("Duration:"));
-    assert!(
-        git_log(&root)
-            .lines()
-            .any(|line| line.starts_with("event:"))
-    );
+    // The commit lands from the detached background child.
+    poll_log(&root, "event:");
 }
 
 #[test]
@@ -239,6 +224,7 @@ fn show_missing_day_is_empty() {
         .args([
             "--dir",
             &root.to_string_lossy(),
+            "event",
             "show",
             "--date",
             "2030-01-01",
@@ -252,6 +238,7 @@ fn show_missing_day_is_empty() {
         .args([
             "--dir",
             &root.to_string_lossy(),
+            "event",
             "show",
             "--date",
             "2030-01-01",
@@ -271,7 +258,14 @@ fn bad_date_fails() {
 
     let root = storage(&env);
     let out = cmd(&env)
-        .args(["--dir", &root.to_string_lossy(), "show", "--date", "nope"])
+        .args([
+            "--dir",
+            &root.to_string_lossy(),
+            "event",
+            "show",
+            "--date",
+            "nope",
+        ])
         .output()
         .unwrap();
     assert!(!out.status.success());
@@ -282,7 +276,14 @@ fn missing_config_points_to_init() {
     let env = setup();
     let root = storage(&env);
     let out = cmd(&env)
-        .args(["--dir", &root.to_string_lossy(), "show", "--date", "today"])
+        .args([
+            "--dir",
+            &root.to_string_lossy(),
+            "event",
+            "show",
+            "--date",
+            "today",
+        ])
         .output()
         .unwrap();
     assert!(!out.status.success());
@@ -307,7 +308,7 @@ fn open_uses_config_dirs_opener() {
     let root = storage(&env);
     let out = cmd(&env)
         .env_remove("EDITOR")
-        .args(["--dir", &root.to_string_lossy(), "open", "notes"])
+        .args(["--dir", &root.to_string_lossy(), "open", "note"])
         .output()
         .unwrap();
     assert!(
@@ -389,7 +390,7 @@ fn open_notes_commits_on_exit() {
     let root = storage(&env);
     let out = cmd(&env)
         .env("EDITOR", &editor)
-        .args(["--dir", &root.to_string_lossy(), "open", "notes"])
+        .args(["--dir", &root.to_string_lossy(), "open", "note"])
         .output()
         .unwrap();
     assert!(
@@ -398,7 +399,7 @@ fn open_notes_commits_on_exit() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(root.join("notes").join("picked.md").exists());
-    poll_log(&root, "open: notes");
+    poll_log(&root, "open: note");
 }
 
 #[test]
@@ -415,7 +416,7 @@ fn open_syncs_in_background_after_exit() {
     let out = cmd(&env)
         .env("EDITOR", &editor)
         .env_remove("XDG_DATA_HOME")
-        .args(["--dir", &root.to_string_lossy(), "open", "notes"])
+        .args(["--dir", &root.to_string_lossy(), "open", "note"])
         .output()
         .unwrap();
     assert!(
@@ -427,7 +428,7 @@ fn open_syncs_in_background_after_exit() {
         String::from_utf8_lossy(&out.stdout).contains("syncing in background"),
         "foreground must detach, not block on push"
     );
-    poll_log(&root, "open: notes");
+    poll_log(&root, "open: note");
     assert!(root.join("notes").join("picked.md").exists());
 }
 
@@ -444,7 +445,7 @@ fn open_events_opens_the_events_dir() {
     let root = storage(&env);
     let out = cmd(&env)
         .env("EDITOR", &editor)
-        .args(["--dir", &root.to_string_lossy(), "open", "events"])
+        .args(["--dir", &root.to_string_lossy(), "open", "event"])
         .output()
         .unwrap();
     assert!(
@@ -466,7 +467,7 @@ fn open_runs_dirs_opener_inside_target_dir() {
     let root = storage(&env);
     let out = cmd(&env)
         .env("EDITOR", &editor)
-        .args(["--dir", &root.to_string_lossy(), "open", "notes"])
+        .args(["--dir", &root.to_string_lossy(), "open", "note"])
         .output()
         .unwrap();
     assert!(
@@ -592,7 +593,7 @@ fn write_config_with_remote(env: &Env, remote: &Path) {
 }
 
 #[test]
-fn event_pulls_remote_before_editing() {
+fn event_merges_remote_in_background() {
     let env = setup();
     assert!(cmd(&env).arg("init").output().unwrap().status.success());
 
@@ -617,6 +618,8 @@ fn event_pulls_remote_before_editing() {
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
+    // Shared base must reach the remote before the other device clones.
+    poll_remote(&remote, "event:");
 
     // Another device pushes while this one is idle.
     let other = env.home.join("other");
@@ -627,7 +630,7 @@ fn event_pulls_remote_before_editing() {
     git_ok(&env, &other, &["commit", "-qm", "remote note"]);
     git_ok(&env, &other, &["push", "-q", "-u", "origin", "HEAD"]);
 
-    // The next edit must pull first: the remote note appears locally.
+    // The next edit merges the remote note in the background child.
     let out = cmd(&env)
         .env("EDITOR", &editor)
         .args([
@@ -644,9 +647,33 @@ fn event_pulls_remote_before_editing() {
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    assert!(root.join("notes").join("from-remote.md").exists());
+    poll_file(&root.join("notes").join("from-remote.md"));
     assert!(root.join("events").join("2026-11-20.md").exists());
     assert!(root.join("events").join("2026-11-21.md").exists());
+    poll_log(&root, "event:");
+}
+
+/// Poll until the bare remote contains a commit with `prefix`.
+/// Event/open pushes land from the background child; the next device
+/// must clone only after they arrive, or it forks unrelated history.
+fn poll_remote(remote: &Path, prefix: &str) {
+    for _ in 0..200 {
+        let out = Command::new("git")
+            .arg("--git-dir")
+            .arg(remote)
+            .args(["log", "--format=%s"])
+            .output()
+            .unwrap();
+        if out.status.success()
+            && String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .any(|line| line.starts_with(prefix))
+        {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    panic!("remote never received '{prefix}': {}", remote.display());
 }
 
 /// Poll for a file the detached sync child is about to write.
@@ -677,7 +704,7 @@ fn open_pulls_remote_in_background_on_exit() {
     let root = storage(&env);
     let out = cmd(&env)
         .env("EDITOR", &editor)
-        .args(["--dir", &root.to_string_lossy(), "open", "notes"])
+        .args(["--dir", &root.to_string_lossy(), "open", "note"])
         .output()
         .unwrap();
     assert!(
@@ -685,7 +712,8 @@ fn open_pulls_remote_in_background_on_exit() {
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    poll_log(&root, "open: notes");
+    poll_log(&root, "open: note");
+    poll_remote(&remote, "open: note");
 
     // Another device pushes while this one is idle.
     let other = env.home.join("other");
@@ -705,7 +733,7 @@ fn open_pulls_remote_in_background_on_exit() {
     );
     let out = cmd(&env)
         .env("EDITOR", &editor2)
-        .args(["--dir", &root.to_string_lossy(), "open", "notes"])
+        .args(["--dir", &root.to_string_lossy(), "open", "note"])
         .output()
         .unwrap();
     assert!(
@@ -715,7 +743,7 @@ fn open_pulls_remote_in_background_on_exit() {
     );
     poll_file(&root.join("notes").join("from-remote.md"));
     assert!(root.join("notes").join("local2.md").exists());
-    poll_log(&root, "open: notes");
+    poll_log(&root, "open: note");
 }
 
 #[test]
@@ -746,21 +774,49 @@ fn first_push_sets_upstream() {
     );
 
     // The first push establishes tracking: plain `git pull` works from here.
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(&root)
-        .args(["rev-parse", "--verify", "@{u}"])
-        .output()
-        .unwrap();
-    assert!(
-        out.status.success(),
-        "no upstream after first push: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    // The upstream is set by the detached background push: poll for it.
+    poll_upstream(&root);
+}
+
+/// Poll until `@{u}` resolves: the background push sets tracking.
+fn poll_upstream(root: &Path) {
+    for _ in 0..200 {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(["rev-parse", "--verify", "@{u}"])
+            .output()
+            .unwrap();
+        if out.status.success() {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    panic!("background push never set upstream in {}", root.display());
+}
+
+/// Poll until the sync log contains `needle`.
+fn poll_sync_log(env: &Env, needle: &str) {
+    let log = env
+        .home
+        .join(".local")
+        .join("share")
+        .join("chora")
+        .join("sync.log");
+    for _ in 0..200 {
+        if std::fs::read_to_string(&log)
+            .unwrap_or_default()
+            .contains(needle)
+        {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    panic!("sync log never contained '{needle}'");
 }
 
 #[test]
-fn event_without_upstream_skips_pull_and_fails_loud_at_push() {
+fn event_without_upstream_skips_pull_and_reports_push_in_log() {
     let env = setup();
     assert!(cmd(&env).arg("init").output().unwrap().status.success());
 
@@ -799,10 +855,12 @@ fn event_without_upstream_skips_pull_and_fails_loud_at_push() {
     write_config_with_remote(&env, &remote);
 
     // Must not stick at pull with "no tracking information": the pull is
-    // skipped, the edit is committed, and the diverged push fails loudly.
+    // skipped, the edit is committed in the background child, and the
+    // diverged push lands loudly in the sync log — the foreground exits 0.
     let editor = editor_script(&env, "noop.sh", "#!/bin/sh\nexit 0\n");
     let out = cmd(&env)
         .env("EDITOR", &editor)
+        .env_remove("XDG_DATA_HOME")
         .args([
             "--dir",
             &root.to_string_lossy(),
@@ -812,18 +870,18 @@ fn event_without_upstream_skips_pull_and_fails_loud_at_push() {
         ])
         .output()
         .unwrap();
-    assert!(!out.status.success());
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert!(
         !String::from_utf8_lossy(&out.stderr).contains("no tracking information"),
         "stuck at pull instead of push: {}",
         String::from_utf8_lossy(&out.stderr)
     );
-    assert!(
-        git_log(&root)
-            .lines()
-            .any(|line| line.starts_with("event:")),
-        "local edit must be committed even when push fails"
-    );
+    poll_log(&root, "event:");
+    poll_sync_log(&env, "diverged");
 }
 
 #[test]
@@ -853,6 +911,8 @@ fn event_refuses_diverged_day_loudly() {
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
+    // Shared base must reach the remote before the other device clones.
+    poll_remote(&remote, "event:");
 
     // Another device rewrites the same day file and pushes.
     let other = env.home.join("other");
@@ -865,15 +925,20 @@ fn event_refuses_diverged_day_loudly() {
     git_ok(&env, &other, &["commit", "-qm", "remote edit"]);
     git_ok(&env, &other, &["push", "-q"]);
 
-    // Meanwhile this device commits something else without pushing
+    // Meanwhile this device edits the same day file without pushing
     // (e.g. it was offline): histories genuinely diverge now.
-    std::fs::write(root.join("notes").join("local.md"), "# local\n").unwrap();
+    let local_day = root.join("events").join("2026-11-20.md");
+    let mut text = std::fs::read_to_string(&local_day).unwrap();
+    text.push_str("\n## Local\nTime: 10:00\nDuration: 1h\n");
+    std::fs::write(&local_day, text).unwrap();
     git_ok(&env, &root, &["add", "-A"]);
     git_ok(&env, &root, &["commit", "-qm", "local offline work"]);
 
-    // Local base is stale: refuse before touching the file, loudly.
+    // Local base is stale: the foreground still exits 0 (nothing blocks
+    // the editor), but the background rebase refuses and names it loudly.
     let out = cmd(&env)
         .env("EDITOR", &editor)
+        .env_remove("XDG_DATA_HOME")
         .args([
             "--dir",
             &root.to_string_lossy(),
@@ -883,17 +948,12 @@ fn event_refuses_diverged_day_loudly() {
         ])
         .output()
         .unwrap();
-    assert!(!out.status.success());
     assert!(
-        String::from_utf8_lossy(&out.stderr).contains("diverged"),
-        "must name the divergence: {}",
+        out.status.success(),
+        "{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let local = std::fs::read_to_string(root.join("events").join("2026-11-20.md")).unwrap();
-    assert!(
-        !local.contains("## Remote"),
-        "stale base must never be edited over"
-    );
+    poll_sync_log(&env, "diverged");
 }
 
 #[test]
@@ -938,7 +998,7 @@ fn open_without_changes_is_quiet() {
     let out = cmd(&env)
         .env("EDITOR", &editor)
         .env_remove("XDG_DATA_HOME")
-        .args(["--dir", &root.to_string_lossy(), "open", "notes"])
+        .args(["--dir", &root.to_string_lossy(), "open", "note"])
         .output()
         .unwrap();
     assert!(
@@ -946,7 +1006,7 @@ fn open_without_changes_is_quiet() {
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    poll_log(&root, "open: notes");
+    poll_log(&root, "open: note");
     let log = env
         .home
         .join(".local")
@@ -999,4 +1059,159 @@ fn first_run_checks_out_remote_on_new_device() {
     );
     assert!(root.join("notes").join("seed.md").exists());
     assert!(root.join("events").join("2026-11-20.md").exists());
+}
+
+#[test]
+fn open_rejects_old_plurals() {
+    let env = setup();
+    assert!(cmd(&env).arg("init").output().unwrap().status.success());
+
+    let root = storage(&env);
+    for target in ["notes", "events"] {
+        let out = cmd(&env)
+            .args(["--dir", &root.to_string_lossy(), "open", target])
+            .output()
+            .unwrap();
+        assert!(!out.status.success(), "open {target} must not parse");
+    }
+}
+
+#[test]
+fn event_rejects_mixed_show_flags() {
+    let env = setup();
+    assert!(cmd(&env).arg("init").output().unwrap().status.success());
+
+    let root = storage(&env);
+    let out = cmd(&env)
+        .args([
+            "--dir",
+            &root.to_string_lossy(),
+            "event",
+            "--date",
+            "today",
+            "show",
+        ])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+}
+
+#[test]
+fn event_show_lists_all_days() {
+    let env = setup();
+    assert!(cmd(&env).arg("init").output().unwrap().status.success());
+
+    let root = storage(&env);
+    std::fs::create_dir_all(root.join("events")).unwrap();
+    std::fs::write(
+        root.join("events").join("2026-11-20.md"),
+        "# 2026-11-20\n\n## Standup\nTime: 10:00\nDuration: 1h\n\nAgenda.\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("events").join("2026-11-21.md"),
+        "# 2026-11-21\n\n## Demo\nTime: 15:00\nDuration: 30m\n\nShip it.\n",
+    )
+    .unwrap();
+
+    let out = cmd(&env)
+        .args(["--dir", &root.to_string_lossy(), "event", "show"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(text.contains("Standup"));
+    assert!(text.contains("Demo"));
+
+    let out = cmd(&env)
+        .args(["--dir", &root.to_string_lossy(), "event", "show", "--json"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let parsed: serde_json::Value =
+        serde_json::from_str(&String::from_utf8_lossy(&out.stdout)).unwrap();
+    assert_eq!(parsed.as_array().unwrap().len(), 2);
+}
+
+#[test]
+fn event_show_date_merges_repeatables() {
+    let env = setup();
+    assert!(cmd(&env).arg("init").output().unwrap().status.success());
+
+    // 2026-11-23 is a Monday.
+    let root = storage(&env);
+    std::fs::create_dir_all(root.join("events").join("repeatable")).unwrap();
+    std::fs::write(
+        root.join("events").join("repeatable").join("monday.md"),
+        "# Monday\n\n## Teeth\nTime: 09:00\nDuration: 10m\n\nBrush.\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(root.join("events")).unwrap();
+    std::fs::write(
+        root.join("events").join("2026-11-23.md"),
+        "# 2026-11-23\n\n## Standup\nTime: 10:00\nDuration: 1h\n\nAgenda.\n",
+    )
+    .unwrap();
+
+    // Dotted date format works too.
+    let out = cmd(&env)
+        .args([
+            "--dir",
+            &root.to_string_lossy(),
+            "event",
+            "show",
+            "--date",
+            "23.11.2026",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(text.contains("Standup"));
+    assert!(text.contains("Teeth"));
+
+    // Tuesday has no repeatable.
+    let out = cmd(&env)
+        .args([
+            "--dir",
+            &root.to_string_lossy(),
+            "event",
+            "show",
+            "--date",
+            "2026-11-24",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let parsed: serde_json::Value =
+        serde_json::from_str(&String::from_utf8_lossy(&out.stdout)).unwrap();
+    assert_eq!(parsed.as_array().unwrap().len(), 0);
+
+    // Monday JSON carries the queried date on the repeatable.
+    let out = cmd(&env)
+        .args([
+            "--dir",
+            &root.to_string_lossy(),
+            "event",
+            "show",
+            "--date",
+            "2026-11-23",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    let parsed: serde_json::Value =
+        serde_json::from_str(&String::from_utf8_lossy(&out.stdout)).unwrap();
+    let items = parsed.as_array().unwrap();
+    assert_eq!(items.len(), 2);
+    assert!(items.iter().all(|item| item["date"] == "2026-11-23"));
 }

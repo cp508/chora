@@ -13,8 +13,8 @@ use crate::error::ChoraError;
 /// Full command tree, printed for bare `chora`.
 pub const HELP_TREE: &str = r#"Commands:
   init           Bootstrap the config. Storage appears on first use.
-   open           Open a storage dir once, sync on exit.
-    <notes|events>
+  open           Open a storage dir once, sync on exit.
+    <note|event>
                  which directory to open
   event          Day events.
     --date <DATE>
@@ -23,15 +23,16 @@ pub const HELP_TREE: &str = r#"Commands:
                  TUI form for creating an event
     --confirm
                  with --tui: open the day file after submit
-  show           Show the events of a day.
-    --date <DATE>
-                 which day to show
-    --json
+    show
+                 show events: one day with --date, all days without
+      --date <DATE>
+                 which day to show (default: all days)
+      --json
                  print a JSON array for scripts
 Options:
   --dir <PATH>   override chora_dir for one run
   --debug        verbose internals on stderr
-<DATE> is today, tomorrow, or YYYY-MM-DD.
+<DATE> is today, tomorrow, YYYY-MM-DD, or DD.MM.YYYY.
 Openers: `editor` for files, `open_dirs` for directories, $EDITOR when empty.
 "#;
 
@@ -133,9 +134,24 @@ pub struct Cli {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum OpenTarget {
     /// The `notes/` directory.
-    Notes,
+    Note,
     /// The `events/` directory.
-    Events,
+    Event,
+}
+
+/// Actions under `event`.
+#[derive(Debug, Subcommand)]
+pub enum EventAction {
+    /// Show events: one day with `--date`, all days without.
+    #[command(disable_help_flag = true)]
+    Show {
+        /// Date: today|tomorrow|YYYY-MM-DD|DD.MM.YYYY. Empty = all days.
+        #[arg(long)]
+        date: Option<String>,
+        /// JSON array for scripts.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 /// chora subcommands.
@@ -144,7 +160,7 @@ pub enum Cmd {
     /// Bootstrap the config. No flags; storage appears on first use.
     #[command(disable_help_flag = true)]
     Init,
-    /// Open a storage dir once in the dirs-opener, commit on exit.
+    /// Open a storage dir once in the dirs-opener, sync on exit.
     #[command(disable_help_flag = true)]
     Open {
         /// Which directory to open.
@@ -162,16 +178,8 @@ pub enum Cmd {
         /// After the TUI, open the day file in the file opener right away.
         #[arg(long)]
         confirm: bool,
-    },
-    /// Show the events of a day.
-    #[command(disable_help_flag = true)]
-    Show {
-        /// Date: today|tomorrow|YYYY-MM-DD.
-        #[arg(long)]
-        date: String,
-        /// JSON array for scripts.
-        #[arg(long)]
-        json: bool,
+        #[command(subcommand)]
+        action: Option<EventAction>,
     },
     /// Finish an `open` in the background: add, commit, push, exit.
     /// Spawned detached by `Cmd::Open` after the editor closes; not for hands.
@@ -189,12 +197,13 @@ pub fn today() -> NaiveDate {
     chrono::Local::now().date_naive()
 }
 
-/// Parse a date argument: `today|tomorrow|YYYY-MM-DD`.
+/// Parse a date argument: `today|tomorrow|YYYY-MM-DD|DD.MM.YYYY`.
 pub fn parse_date_arg(raw: &str) -> anyhow::Result<NaiveDate> {
     match raw {
         "today" => Ok(today()),
         "tomorrow" => today().succ_opt().context("date overflow for tomorrow"),
         _ => NaiveDate::parse_from_str(raw, "%Y-%m-%d")
+            .or_else(|_| NaiveDate::parse_from_str(raw, "%d.%m.%Y"))
             .map_err(|_| ChoraError::BadDate(raw.to_owned()).into()),
     }
 }
@@ -248,18 +257,51 @@ mod tests {
     }
 
     #[test]
-    fn parses_show_with_json() {
-        let cli = Cli::try_parse_from(["chora", "show", "--date", "2026-11-20", "--json"]).unwrap();
-        assert!(matches!(cli.cmd, Some(Cmd::Show { json: true, .. })));
+    fn parses_event_show_with_json() {
+        let cli = Cli::try_parse_from(["chora", "event", "show", "--date", "2026-11-20", "--json"])
+            .unwrap();
+        assert!(matches!(
+            cli.cmd,
+            Some(Cmd::Event {
+                action: Some(EventAction::Show { json: true, .. }),
+                ..
+            })
+        ));
     }
 
     #[test]
-    fn parses_open_notes() {
-        let cli = Cli::try_parse_from(["chora", "open", "notes"]).unwrap();
+    fn parses_event_show_without_date() {
+        let cli = Cli::try_parse_from(["chora", "event", "show"]).unwrap();
+        assert!(matches!(
+            cli.cmd,
+            Some(Cmd::Event {
+                action: Some(EventAction::Show {
+                    date: None,
+                    json: false
+                }),
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn parses_open_note() {
+        let cli = Cli::try_parse_from(["chora", "open", "note"]).unwrap();
         assert!(matches!(
             cli.cmd,
             Some(Cmd::Open {
-                target: OpenTarget::Notes
+                target: OpenTarget::Note
+            })
+        ));
+    }
+
+    #[test]
+    fn parses_open_event() {
+        let cli = Cli::try_parse_from(["chora", "open", "event"]).unwrap();
+        assert!(matches!(
+            cli.cmd,
+            Some(Cmd::Open {
+                target: OpenTarget::Event
             })
         ));
     }
@@ -272,7 +314,7 @@ mod tests {
             "/tmp/c",
             "sync-after-open",
             "--message",
-            "open: notes",
+            "open: note",
         ])
         .unwrap();
         assert!(matches!(cli.cmd, Some(Cmd::SyncAfterOpen { .. })));
@@ -281,8 +323,10 @@ mod tests {
 
     #[test]
     fn dir_is_global() {
-        let cli =
-            Cli::try_parse_from(["chora", "--dir", "/tmp/c", "show", "--date", "today"]).unwrap();
+        let cli = Cli::try_parse_from([
+            "chora", "--dir", "/tmp/c", "event", "show", "--date", "today",
+        ])
+        .unwrap();
         assert_eq!(cli.dir, Some(PathBuf::from("/tmp/c")));
     }
 
@@ -294,7 +338,8 @@ mod tests {
             Some(Cmd::Event {
                 tui: true,
                 confirm: true,
-                date: None
+                date: None,
+                action: None
             })
         ));
     }
@@ -317,17 +362,26 @@ mod tests {
     }
 
     #[test]
+    fn date_arg_dots() {
+        assert_eq!(
+            parse_date_arg("20.05.2026").unwrap(),
+            NaiveDate::from_ymd_opt(2026, 5, 20).unwrap()
+        );
+    }
+
+    #[test]
     fn date_arg_rejects_garbage() {
-        for raw in ["", "yesterday", "20-11-2026", "2026-13-01"] {
+        for raw in ["", "yesterday", "20-11-2026", "2026-13-01", "32.01.2026"] {
             assert!(parse_date_arg(raw).is_err(), "{raw}");
         }
     }
 
     #[test]
     fn debug_flag_is_global() {
-        let cli = Cli::try_parse_from(["chora", "--debug", "show", "--date", "today"]).unwrap();
+        let cli =
+            Cli::try_parse_from(["chora", "--debug", "event", "show", "--date", "today"]).unwrap();
         assert!(cli.debug);
-        let cli = Cli::try_parse_from(["chora", "show", "--date", "today"]).unwrap();
+        let cli = Cli::try_parse_from(["chora", "event", "show", "--date", "today"]).unwrap();
         assert!(!cli.debug);
     }
 }

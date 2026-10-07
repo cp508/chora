@@ -1,4 +1,4 @@
-//! Storage layout: `events/`, `notes/`, day files.
+//! Storage layout: `events/`, `notes/`, day files, repeatables.
 
 use std::path::{Path, PathBuf};
 
@@ -6,6 +6,7 @@ use anyhow::Context;
 use chrono::NaiveDate;
 
 use crate::config::OldEventPolicy;
+use crate::event::Event;
 
 pub struct Store {
     root: PathBuf,
@@ -175,6 +176,49 @@ impl Store {
         }
     }
 
+    /// All days with a file, oldest first. Missing `events/` is empty.
+    /// `backlog/` and `repeatable/` are not day files and never listed.
+    pub fn list_days(&self) -> anyhow::Result<Vec<NaiveDate>> {
+        let events = self.events_dir();
+        if !events.is_dir() {
+            return Ok(Vec::new());
+        }
+        let mut days = Vec::new();
+        for entry in std::fs::read_dir(&events)
+            .with_context(|| format!("failed to list {}", events.display()))?
+        {
+            let entry = entry?;
+            if !entry.file_type()?.is_file() {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let Some(raw) = name.strip_suffix(".md") else {
+                continue;
+            };
+            if let Ok(date) = NaiveDate::parse_from_str(raw, "%Y-%m-%d") {
+                days.push(date);
+            }
+        }
+        days.sort();
+        Ok(days)
+    }
+
+    /// Repeatable events for `date`: the `events/repeatable/<weekday>.md`
+    /// file (e.g. `monday.md`), parsed with `date` as the event date.
+    /// Missing file or dir is no repeatables, not an error.
+    pub fn read_repeatables(&self, date: NaiveDate) -> anyhow::Result<Vec<Event>> {
+        let weekday = date.format("%A").to_string().to_lowercase();
+        let path = self
+            .events_dir()
+            .join("repeatable")
+            .join(format!("{weekday}.md"));
+        match std::fs::read_to_string(&path) {
+            Ok(text) => Ok(crate::event::parse_day(date, &text)),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+            Err(err) => Err(err).with_context(|| format!("failed to read {}", path.display())),
+        }
+    }
+
     /// Appends a section; creates the day file first.
     pub fn append_section(&self, date: NaiveDate, section: &str) -> anyhow::Result<()> {
         let path = self.ensure_day_file(date)?;
@@ -339,5 +383,61 @@ mod tests {
             .sweep_old_events(OldEventPolicy::Delete, today)
             .unwrap();
         assert_eq!(report, SweepReport::default());
+    }
+
+    #[test]
+    fn list_days_sorts_and_skips_non_days() {
+        let (_tmp, store) = sweep_fixture();
+        // sweep_fixture: 2026-11-19/20/21.md + stray seen.md.
+        let days = store.list_days().unwrap();
+        assert_eq!(
+            days,
+            vec![
+                NaiveDate::from_ymd_opt(2026, 11, 19).unwrap(),
+                NaiveDate::from_ymd_opt(2026, 11, 20).unwrap(),
+                NaiveDate::from_ymd_opt(2026, 11, 21).unwrap(),
+            ]
+        );
+    }
+
+    #[test]
+    fn list_days_ignores_subdirs() {
+        let (_tmp, store) = sweep_fixture();
+        std::fs::create_dir_all(store.events_dir().join("repeatable")).unwrap();
+        std::fs::create_dir_all(store.events_dir().join("backlog")).unwrap();
+        assert_eq!(store.list_days().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn list_days_without_events_dir_is_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Store::new(tmp.path().to_path_buf());
+        assert!(store.list_days().unwrap().is_empty());
+    }
+
+    #[test]
+    fn repeatables_match_weekday() {
+        let (_tmp, store) = sweep_fixture();
+        // 2026-11-23 is a Monday.
+        let monday = NaiveDate::from_ymd_opt(2026, 11, 23).unwrap();
+        assert_eq!(monday.format("%A").to_string(), "Monday");
+        assert!(store.read_repeatables(monday).unwrap().is_empty());
+
+        let dir = store.events_dir().join("repeatable");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("monday.md"),
+            "# Monday\n\n## Teeth\nTime: 09:00\nDuration: 10m\n\nBrush.\n",
+        )
+        .unwrap();
+        let events = store.read_repeatables(monday).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].title, "Teeth");
+        // Parsed with the queried date, not the file's.
+        assert_eq!(events[0].date, monday);
+
+        // Other weekdays are untouched by a Monday query.
+        let tuesday = NaiveDate::from_ymd_opt(2026, 11, 24).unwrap();
+        assert!(store.read_repeatables(tuesday).unwrap().is_empty());
     }
 }

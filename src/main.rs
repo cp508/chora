@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::Context;
-use chora::cli::{Cli, Cmd, OpenTarget, parse_date_arg, render_help_tree, today};
+use chora::cli::{Cli, Cmd, EventAction, OpenTarget, parse_date_arg, render_help_tree, today};
 use chora::config::{Config, OldEventPolicy};
 use chora::error::ChoraError;
 use chora::store::Store;
@@ -24,46 +24,52 @@ fn main() -> anyhow::Result<()> {
             let (cfg, store) = load_store(cli.dir.as_deref(), true)?;
             require_repo(&store)?;
             let (dir, name) = match target {
-                OpenTarget::Notes => (store.notes_dir(), "notes"),
-                OpenTarget::Events => (store.events_dir(), "events"),
+                OpenTarget::Note => (store.notes_dir(), "note"),
+                OpenTarget::Event => (store.events_dir(), "event"),
             };
             // cwd = target: `sh -c '... $(fzf)'` openers scan cwd and ignore
             // the target arg (it lands in $0), so root would show both dirs.
             // No network up here: the opener must start instantly, and nothing
             // may delay the detach below. The pull lives in the detached
             // `sync-after-open` child.
-            if matches!(target, OpenTarget::Events) {
+            if matches!(target, OpenTarget::Event) {
                 sweep_old_events(&store, &cfg)?;
             }
-            editor::open(&dir, &dir, dirs_opener(&cfg))?;
+            sync::with_auto_commit(store.root(), cfg.main.auto_commit, name, || {
+                editor::open(&dir, &dir, dirs_opener(&cfg))
+            })?;
             sync_in_background(&store, cli.dir.as_deref(), &format!("open: {name}"))
         }
         Cmd::Event {
             date,
             tui: use_tui,
             confirm,
+            action,
         } => {
-            let (cfg, store) = load_store(cli.dir.as_deref(), true)?;
-            require_repo(&store)?;
-            let open = files_opener(&cfg);
-            match (date, use_tui) {
-                (Some(_), true) => Err(ChoraError::EventExclusiveTarget.into()),
-                (None, false) => Err(ChoraError::EventNeedsTarget.into()),
-                (Some(raw), false) => cmd_event_stub(&store, &cfg, &raw, open),
-                (None, true) => cmd_event_tui(&store, &cfg, confirm, open),
+            let creating = date.is_some() || use_tui || confirm;
+            match action {
+                Some(_) if creating => Err(ChoraError::EventExclusiveAction.into()),
+                // Read-only: showing never creates storage or needs a repo.
+                Some(EventAction::Show { date, json }) => {
+                    let (_cfg, store) = load_store(cli.dir.as_deref(), false)?;
+                    cmd_event_show(&store, date.as_deref(), json)
+                }
+                None => {
+                    let (cfg, store) = load_store(cli.dir.as_deref(), true)?;
+                    require_repo(&store)?;
+                    let open = files_opener(&cfg);
+                    match (date, use_tui) {
+                        (Some(_), true) => Err(ChoraError::EventExclusiveTarget.into()),
+                        (None, false) => Err(ChoraError::EventNeedsTarget.into()),
+                        (Some(raw), false) => {
+                            cmd_event_stub(&store, &cfg, &raw, open, cli.dir.as_deref())
+                        }
+                        (None, true) => {
+                            cmd_event_tui(&store, &cfg, confirm, open, cli.dir.as_deref())
+                        }
+                    }
+                }
             }
-        }
-        Cmd::Show { date, json } => {
-            let (_cfg, store) = load_store(cli.dir.as_deref(), false)?;
-            let day = parse_date_arg(&date)?;
-            let text = store.read_day(day)?;
-            let events = event::parse_day(day, &text);
-            if json {
-                println!("{}", output::json(&events)?);
-            } else {
-                print!("{}", output::plaintext(day, &events));
-            }
-            Ok(())
         }
         Cmd::SyncAfterOpen { message } => {
             let (_cfg, store) = load_store(cli.dir.as_deref(), true)?;
@@ -217,19 +223,66 @@ fn cmd_init() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Read-only show: one day (plus its repeatables) or all days.
+/// Showing never creates storage, needs no repo, and touches no network.
+fn cmd_event_show(store: &Store, raw: Option<&str>, json: bool) -> anyhow::Result<()> {
+    if let Some(raw) = raw {
+        let day = parse_date_arg(raw)?;
+        let mut events = event::parse_day(day, &store.read_day(day)?);
+        events.extend(store.read_repeatables(day)?);
+        events.sort_by_key(|event| event.time);
+        if json {
+            println!("{}", output::json(&events)?);
+        } else {
+            print!("{}", output::plaintext(day, &events));
+        }
+        return Ok(());
+    }
+    let mut all = Vec::new();
+    let mut chunks = Vec::new();
+    for day in store.list_days()? {
+        let events = event::parse_day(day, &store.read_day(day)?);
+        if events.is_empty() {
+            continue;
+        }
+        if json {
+            all.extend(events);
+        } else {
+            chunks.push(output::plaintext(day, &events));
+        }
+    }
+    if json {
+        println!("{}", output::json(&all)?);
+    } else if chunks.is_empty() {
+        println!("(no events)");
+    } else {
+        for chunk in chunks {
+            print!("{chunk}");
+        }
+    }
+    Ok(())
+}
+
 fn cmd_event_stub(
     store: &Store,
     cfg: &Config,
     raw: &str,
     open: Option<&str>,
+    dir: Option<&Path>,
 ) -> anyhow::Result<()> {
     let day = parse_date_arg(raw)?;
-    sync::pull_before_edit(store)?;
+    // No network up here: the opener must start instantly. Fresh remote
+    // work merges in the detached child on exit (rebase heals fast-forwards;
+    // real conflicts land loudly in `sync.log`).
     sweep_old_events(store, cfg)?;
     let path = store.ensure_day_file(day)?;
     store.append_section(day, "## \nTime: \nDuration: \n")?;
-    editor::open(&path, store.root(), open)?;
-    sync::commit_and_push(store, &format!("event: {}", day.format("%Y-%m-%d")))
+    sync::with_auto_commit(store.root(), cfg.main.auto_commit, "event", || {
+        editor::open(&path, store.root(), open)
+    })?;
+    // Same detach as `open` on exit: the shell is back instantly, the
+    // commit + rebase + push finish in the background child.
+    sync_in_background(store, dir, &format!("event: {}", day.format("%Y-%m-%d")))
 }
 
 fn cmd_event_tui(
@@ -237,6 +290,7 @@ fn cmd_event_tui(
     cfg: &Config,
     confirm: bool,
     open: Option<&str>,
+    dir: Option<&Path>,
 ) -> anyhow::Result<()> {
     let data = match tui::run()? {
         tui::TuiOutcome::Cancelled => return Ok(()),
@@ -251,16 +305,18 @@ fn cmd_event_tui(
         duration,
         context: data.context.clone(),
     });
-    // Pull after the form, right before the write: the freshest base wins.
-    sync::pull_before_edit(store)?;
+    // No network up here either: the form opens instantly, the merge
+    // happens in the detached child after submit.
     store.append_section(data.date, &rendered)?;
     let message = format!("event: {} {}", data.date.format("%Y-%m-%d"), data.title);
     sweep_old_events(store, cfg)?;
-    sync::commit_and_push(store, &message)?;
+    sync_in_background(store, dir, &message)?;
     if confirm {
         let path = store.ensure_day_file(data.date)?;
-        editor::open(&path, store.root(), open)?;
-        sync::commit_and_push(store, &message)?;
+        sync::with_auto_commit(store.root(), cfg.main.auto_commit, "event", || {
+            editor::open(&path, store.root(), open)
+        })?;
+        sync_in_background(store, dir, &message)?;
     }
     Ok(())
 }

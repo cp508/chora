@@ -20,12 +20,6 @@ pub enum ChoraError {
     #[error("git: {0}")]
     Git(String),
 
-    #[error("remote unreachable: {0}")]
-    GitOffline(String),
-
-    #[error("remote auth failed: {0}")]
-    GitAuth(String),
-
     #[error("remote diverged, resolve it inside the storage dir: {0}")]
     GitDiverged(String),
 
@@ -38,7 +32,7 @@ pub enum ChoraError {
     #[error("editor exited: {0}")]
     EditorFailed(String),
 
-    #[error("bad date `{0}`: expected today|tomorrow|YYYY-MM-DD")]
+    #[error("bad date `{0}`: expected today|tomorrow|YYYY-MM-DD|DD.MM.YYYY")]
     BadDate(String),
 
     #[error("bad duration `{0}`: expected 10s|45m|2h|1h30m")]
@@ -52,4 +46,7 @@ pub enum ChoraError {
 
     #[error("pass either --date or --tui, not both")]
     EventExclusiveTarget,
+
+    #[error("pass either --date/--tui or `show`, not both")]
+    EventExclusiveAction,
 }

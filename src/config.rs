@@ -44,6 +44,9 @@ pub struct Main {
     /// Directory opener. Empty = $EDITOR.
     #[serde(default)]
     pub open_dirs: String,
+    /// Auto-commit while the editor is open, in minutes. 0 = off.
+    #[serde(default)]
+    pub auto_commit: u64,
     /// Old day files (before today) on every event action.
     #[serde(default)]
     pub manage_old_event: OldEventPolicy,
@@ -58,6 +61,7 @@ impl Default for Main {
             chora_dir: String::from("~/chora"),
             editor: String::new(),
             open_dirs: String::new(),
+            auto_commit: 0,
             manage_old_event: OldEventPolicy::Nothing,
             remote_url: String::new(),
         }
@@ -79,6 +83,10 @@ fn known_fields() -> Vec<(&'static str, toml::Value)> {
         ("editor", toml::Value::String(defaults.editor)),
         ("open_dirs", toml::Value::String(defaults.open_dirs)),
         (
+            "auto_commit",
+            toml::Value::Integer(defaults.auto_commit as i64),
+        ),
+        (
             "manage_old_event",
             toml::Value::String(defaults.manage_old_event.as_str().to_owned()),
         ),
@@ -96,6 +104,9 @@ fn field_comment(key: &str) -> Option<&'static str> {
         "open_dirs" => {
             Some("# Opener for directories (notes/, events/). Empty = use $EDITOR. Try \"yazi\".")
         }
+        "auto_commit" => Some(
+            "# Auto-commit while the editor is open, in minutes. 0 = off. Local commits only; the push happens on exit.",
+        ),
         "manage_old_event" => Some(
             "# Passed day files (before today) on every event action: delete, backlog (= move to events/backlog/), or nothing.",
         ),
@@ -254,6 +265,7 @@ mod tests {
         assert_eq!(cfg.main.chora_dir, "~/chora");
         assert!(cfg.main.editor.is_empty());
         assert!(cfg.main.open_dirs.is_empty());
+        assert_eq!(cfg.main.auto_commit, 0);
         assert_eq!(cfg.main.manage_old_event, OldEventPolicy::Nothing);
         assert!(cfg.main.remote_url.is_empty());
     }
@@ -277,7 +289,8 @@ mod tests {
         std::fs::write(&path, text).unwrap();
         let cfg = Config::load_from(&path).unwrap();
         assert_eq!(cfg.main.chora_dir, "/tmp/c");
-        // Unknown keys from older versions are ignored.
+        // Revived legacy key: old configs keep their value.
+        assert_eq!(cfg.main.auto_commit, 5);
         assert_eq!(cfg.main.editor, "yazi");
         assert!(cfg.main.open_dirs.is_empty());
         assert_eq!(cfg.main.remote_url, "ssh://vps/x");
@@ -342,6 +355,18 @@ mod tests {
     }
 
     #[test]
+    fn load_from_rejects_non_integer_auto_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[main]\nchora_dir = \"/tmp/c\"\nauto_commit = \"often\"\n",
+        )
+        .unwrap();
+        assert!(Config::load_from(&path).is_err());
+    }
+
+    #[test]
     fn ensure_creates_defaults_from_scratch() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
@@ -351,6 +376,7 @@ mod tests {
         assert_eq!(cfg.main.chora_dir, "~/chora");
         assert!(cfg.main.editor.is_empty());
         assert!(cfg.main.open_dirs.is_empty());
+        assert_eq!(cfg.main.auto_commit, 0);
         assert_eq!(cfg.main.manage_old_event, OldEventPolicy::Nothing);
         assert!(cfg.main.remote_url.is_empty());
     }
@@ -378,6 +404,8 @@ mod tests {
         assert!(text.contains("remote_url = \"\""));
         let cfg = Config::load_from(&path).unwrap();
         assert_eq!(cfg.main.chora_dir, "/tmp/keep");
+        // Legacy value survives the migration untouched.
+        assert_eq!(cfg.main.auto_commit, 3);
     }
 
     #[test]
