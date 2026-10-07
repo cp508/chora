@@ -1062,6 +1062,37 @@ fn first_run_checks_out_remote_on_new_device() {
 }
 
 #[test]
+fn completion_prints_shell_script() {
+    let env = setup();
+    // Needs no config or storage. `completion` itself is hand-parsed
+    // (invisible to the generator), so only schema values are asserted.
+    for (shell, marker, values) in [
+        ("bash", "_chora()", vec!["note event"]),
+        ("fish", "complete", vec!["-a \"note\""]),
+    ] {
+        for name in ["completion", "completions"] {
+            let out = cmd(&env).args([name, shell]).output().unwrap();
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            let text = String::from_utf8_lossy(&out.stdout).into_owned();
+            assert!(text.contains("chora"));
+            assert!(text.contains(marker), "{shell} script misses {marker}");
+            for value in &values {
+                assert!(text.contains(value), "{shell} script misses {value}");
+            }
+            // The internal background child must never leak into completions.
+            assert!(
+                !text.contains("sync-after-open"),
+                "{shell} script leaks the internal command"
+            );
+        }
+    }
+}
+
+#[test]
 fn open_rejects_old_plurals() {
     let env = setup();
     assert!(cmd(&env).arg("init").output().unwrap().status.success());

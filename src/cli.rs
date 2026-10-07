@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 use anyhow::Context;
 use chrono::NaiveDate;
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Parser, Subcommand};
 
 use crate::error::ChoraError;
 
@@ -29,6 +29,9 @@ pub const HELP_TREE: &str = r#"Commands:
                  which day to show (default: all days)
       --json
                  print a JSON array for scripts
+  completion     Print shell completions to stdout.
+    <bash|fish>
+                 which shell to complete
 Options:
   --dir <PATH>   override chora_dir for one run
   --debug        verbose internals on stderr
@@ -119,7 +122,7 @@ pub fn render_help_tree() -> String {
 )]
 pub struct Cli {
     /// Override `chora_dir` from the config for one run.
-    #[arg(long, global = true, value_name = "PATH")]
+    #[arg(long, global = true, value_name = "PATH", value_hint = clap::ValueHint::DirPath)]
     pub dir: Option<PathBuf>,
 
     /// Verbose internals on stderr (levels: error, warn, info, debug).
@@ -130,12 +133,15 @@ pub struct Cli {
     pub cmd: Option<Cmd>,
 }
 
-/// Which storage directory to open.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+/// Which storage directory to open. A subcommand (not a value) so static
+/// completions list it in every shell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Subcommand)]
 pub enum OpenTarget {
     /// The `notes/` directory.
+    #[command(disable_help_flag = true)]
     Note,
     /// The `events/` directory.
+    #[command(disable_help_flag = true)]
     Event,
 }
 
@@ -146,12 +152,19 @@ pub enum EventAction {
     #[command(disable_help_flag = true)]
     Show {
         /// Date: today|tomorrow|YYYY-MM-DD|DD.MM.YYYY. Empty = all days.
-        #[arg(long)]
+        #[arg(long, value_hint = clap::ValueHint::Other)]
         date: Option<String>,
         /// JSON array for scripts.
         #[arg(long)]
         json: bool,
     },
+}
+
+/// Shells with generated completions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompletionShell {
+    Bash,
+    Fish,
 }
 
 /// chora subcommands.
@@ -164,13 +177,14 @@ pub enum Cmd {
     #[command(disable_help_flag = true)]
     Open {
         /// Which directory to open.
+        #[command(subcommand)]
         target: OpenTarget,
     },
     /// Day events.
     #[command(disable_help_flag = true)]
     Event {
         /// Append an event stub to the date file and open it in the file opener.
-        #[arg(long, value_name = "DATE")]
+        #[arg(long, value_name = "DATE", value_hint = clap::ValueHint::Other)]
         date: Option<String>,
         /// TUI form for creating an event.
         #[arg(long)]
@@ -181,14 +195,65 @@ pub enum Cmd {
         #[command(subcommand)]
         action: Option<EventAction>,
     },
-    /// Finish an `open` in the background: add, commit, push, exit.
-    /// Spawned detached by `Cmd::Open` after the editor closes; not for hands.
-    #[command(hide = true, disable_help_flag = true)]
-    SyncAfterOpen {
-        /// Commit message prepared by the foreground `open`.
-        #[arg(long)]
-        message: String,
-    },
+}
+
+/// `chora completion|completions <bash|fish>`, parsed by hand (not a clap
+/// subcommand) so it never leaks into generated shell completions.
+pub fn take_completion(
+    args: impl IntoIterator<Item = std::ffi::OsString>,
+) -> Option<CompletionShell> {
+    use std::ffi::OsStr;
+
+    let args: Vec<_> = args.into_iter().collect();
+    let (name, shell) = match args.as_slice() {
+        [name, shell] => (name, shell),
+        _ => return None,
+    };
+    if name.as_os_str() != OsStr::new("completion") && name.as_os_str() != OsStr::new("completions")
+    {
+        return None;
+    }
+    match shell.as_os_str().to_str()? {
+        "bash" => Some(CompletionShell::Bash),
+        "fish" => Some(CompletionShell::Fish),
+        _ => None,
+    }
+}
+
+/// Internal background child, built by `spawn_sync_child`:
+/// `chora [--dir <PATH>] sync-after-open --message <MSG>`.
+/// Parsed by hand (not a clap subcommand) so it never leaks into
+/// generated shell completions or help.
+#[derive(Debug, PartialEq, Eq)]
+pub struct SyncAfterOpen {
+    pub dir: Option<PathBuf>,
+    pub message: String,
+}
+
+pub fn take_sync_after_open(
+    args: impl IntoIterator<Item = std::ffi::OsString>,
+) -> Option<SyncAfterOpen> {
+    use std::ffi::OsStr;
+
+    let args: Vec<_> = args.into_iter().collect();
+    let (dir, rest) = match args.as_slice() {
+        [flag, path, rest @ ..] if flag.as_os_str() == OsStr::new("--dir") => {
+            (Some(PathBuf::from(path)), rest)
+        }
+        rest => (None, rest),
+    };
+    match rest {
+        [cmd, flag, msg]
+            if cmd.as_os_str() == OsStr::new("sync-after-open")
+                && flag.as_os_str() == OsStr::new("--message") =>
+        {
+            Some(SyncAfterOpen {
+                dir,
+                message: msg.to_str()?.to_owned(),
+            })
+        }
+        _ => None,
+    }
 }
 
 /// Today (local date).
@@ -307,18 +372,83 @@ mod tests {
     }
 
     #[test]
-    fn parses_hidden_sync_after_open() {
-        let cli = Cli::try_parse_from([
-            "chora",
+    fn completion_parses_both_names() {
+        use std::ffi::OsString;
+
+        for name in ["completion", "completions"] {
+            assert_eq!(
+                take_completion([name, "bash"].map(OsString::from)),
+                Some(CompletionShell::Bash)
+            );
+            assert_eq!(
+                take_completion([name, "fish"].map(OsString::from)),
+                Some(CompletionShell::Fish)
+            );
+        }
+    }
+
+    #[test]
+    fn completion_rejects_other_shapes() {
+        use std::ffi::OsString;
+
+        for args in [
+            vec!["completion"],
+            vec!["completion", "zsh"],
+            vec!["completion", "bash", "extra"],
+            vec!["open", "note"],
+            vec!["event", "show"],
+        ] {
+            assert!(
+                take_completion(args.iter().map(OsString::from)).is_none(),
+                "{args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn sync_after_open_parses_full_shape() {
+        let args = [
             "--dir",
             "/tmp/c",
             "sync-after-open",
             "--message",
             "open: note",
-        ])
-        .unwrap();
-        assert!(matches!(cli.cmd, Some(Cmd::SyncAfterOpen { .. })));
-        assert_eq!(cli.dir, Some(PathBuf::from("/tmp/c")));
+        ];
+        assert_eq!(
+            take_sync_after_open(args.map(std::ffi::OsString::from)),
+            Some(SyncAfterOpen {
+                dir: Some(PathBuf::from("/tmp/c")),
+                message: String::from("open: note"),
+            })
+        );
+    }
+
+    #[test]
+    fn sync_after_open_parses_without_dir() {
+        let args = ["sync-after-open", "--message", "event: 2026-11-20"];
+        assert_eq!(
+            take_sync_after_open(args.map(std::ffi::OsString::from)),
+            Some(SyncAfterOpen {
+                dir: None,
+                message: String::from("event: 2026-11-20"),
+            })
+        );
+    }
+
+    #[test]
+    fn sync_after_open_rejects_other_shapes() {
+        for args in [
+            vec!["open", "note"],
+            vec!["sync-after-open"],
+            vec!["sync-after-open", "--message"],
+            vec!["--dir", "/tmp/c", "sync-after-open"],
+            vec!["event", "show"],
+        ] {
+            assert!(
+                take_sync_after_open(args.iter().map(std::ffi::OsString::from)).is_none(),
+                "{args:?}"
+            );
+        }
     }
 
     #[test]

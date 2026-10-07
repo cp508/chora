@@ -3,7 +3,9 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::Context;
-use chora::cli::{Cli, Cmd, EventAction, OpenTarget, parse_date_arg, render_help_tree, today};
+use chora::cli::{
+    Cli, Cmd, CompletionShell, EventAction, OpenTarget, parse_date_arg, render_help_tree, today,
+};
 use chora::config::{Config, OldEventPolicy};
 use chora::error::ChoraError;
 use chora::store::Store;
@@ -11,6 +13,15 @@ use chora::{editor, event, git, output, sync, tui};
 use clap::Parser;
 
 fn main() -> anyhow::Result<()> {
+    // Internal background child first: it is not a clap subcommand, so it
+    // never leaks into help or generated shell completions.
+    if let Some(internal) = chora::cli::take_sync_after_open(std::env::args_os().skip(1)) {
+        return cmd_sync_after_open(internal.dir.as_deref(), &internal.message);
+    }
+    // Same story: hand-parsed, invisible to generated completions.
+    if let Some(shell) = chora::cli::take_completion(std::env::args_os().skip(1)) {
+        return cmd_completion(shell);
+    }
     let cli = Cli::parse();
     chora::log::init(cli.debug);
     chora::debug_log!("debug logging on");
@@ -71,17 +82,20 @@ fn main() -> anyhow::Result<()> {
                 }
             }
         }
-        Cmd::SyncAfterOpen { message } => {
-            let (_cfg, store) = load_store(cli.dir.as_deref(), true)?;
-            require_repo(&store)?;
-            // Timestamp header: the log is append-only, runs must delimit.
-            eprintln!(
-                "--- sync-after-open {} ---",
-                chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
-            );
-            sync::sync_after_open(&store, &message)
-        }
     }
+}
+
+/// The detached background child: commit the exit state, rebase onto fresh
+/// remote work, push. Failures land in `sync.log` via redirected stderr.
+fn cmd_sync_after_open(dir: Option<&Path>, message: &str) -> anyhow::Result<()> {
+    let (_cfg, store) = load_store(dir, true)?;
+    require_repo(&store)?;
+    // Timestamp header: the log is append-only, runs must delimit.
+    eprintln!(
+        "--- sync-after-open {} ---",
+        chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
+    );
+    sync::sync_after_open(&store, message)
 }
 
 fn load_store(dir: Option<&Path>, bootstrap: bool) -> anyhow::Result<(Config, Store)> {
@@ -206,6 +220,19 @@ fn spawn_sync_child(
 fn sync_log_path() -> anyhow::Result<PathBuf> {
     let data = dirs::data_dir().context("failed to determine the data directory")?;
     Ok(data.join("chora").join("sync.log"))
+}
+
+/// Print shell completions to stdout. Pure: needs no config or storage.
+fn cmd_completion(shell: CompletionShell) -> anyhow::Result<()> {
+    use clap::CommandFactory;
+    use clap_complete::{generate, shells::Bash, shells::Fish};
+
+    let mut cmd = Cli::command();
+    match shell {
+        CompletionShell::Bash => generate(Bash, &mut cmd, "chora", &mut std::io::stdout()),
+        CompletionShell::Fish => generate(Fish, &mut cmd, "chora", &mut std::io::stdout()),
+    }
+    Ok(())
 }
 
 /// No flags: everything comes from the config file.

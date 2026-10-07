@@ -21,3 +21,10 @@ release:
 # move release to /usr/bin
 install_local: release
     sudo cp -f ./target/release/chora /usr/bin/chora
+
+# apply completions: fish sources, bash evals, other: nothing
+completions:
+    case "$SHELL" in \
+        *fish*) "$SHELL" -c 'chora completion fish | source';; \
+        *bash*) "$SHELL" -c 'eval "$(chora completion bash)"';; \
+    esac
