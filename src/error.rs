@@ -38,9 +38,6 @@ pub enum ChoraError {
     #[error("bad duration `{0}`: expected 10s|45m|2h|1h30m")]
     BadDuration(String),
 
-    #[error("bad time `{0}`: expected HH:MM|HHMM|H|now|+30")]
-    BadTime(String),
-
     #[error("pass either --date/--confirm or `show`, not both")]
     EventExclusiveAction,
 }

@@ -26,7 +26,7 @@ use ratatui::{
 };
 
 use crate::cli::today;
-use crate::event::{parse_duration, parse_time_entry, snap_quarter};
+use crate::event::{parse_duration, snap_quarter};
 
 /// Data of a submitted form.
 #[derive(Debug, Clone, PartialEq)]
@@ -113,14 +113,12 @@ fn strict_time(raw: &str) -> Result<NaiveTime, chrono::ParseError> {
 /// the date field when the date is past or malformed.
 const DATE_FACES: [&str; 3] = ["<'(o.o)'>", "`o._.o'", "@(o),(o)"];
 
-/// A random face from the set above. Time-seeded: no `rand` dependency
-/// for a shrug.
-fn random_face() -> &'static str {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|span| span.subsec_nanos())
-        .unwrap_or(0);
-    DATE_FACES[nanos as usize % DATE_FACES.len()]
+/// Deterministic face per date buffer so it stays steady across redraws.
+fn face_for(buf: &str) -> &'static str {
+    let idx = buf
+        .bytes()
+        .fold(0usize, |acc, b| acc.wrapping_add(b as usize));
+    DATE_FACES[idx % DATE_FACES.len()]
 }
 
 /// Live date complaint: past dates and malformed buffers alike.
@@ -197,7 +195,7 @@ impl App {
 
     fn shift_time(&mut self, forward: bool) {
         let now = now_time();
-        let base = parse_time_entry(&self.time_buf, now).unwrap_or(now);
+        let base = strict_time(&self.time_buf).unwrap_or(now);
         self.time_buf = snap_quarter(base, forward).format("%H:%M").to_string();
         self.error = None;
         self.cursor = self.buf().chars().count();
@@ -338,16 +336,18 @@ impl App {
     }
 }
 
-/// Run the form. The terminal is restored on every exit path.
-pub fn run() -> anyhow::Result<TuiOutcome> {
+/// Run a closure inside the alternate screen with raw mode enabled,
+/// restoring the terminal on every exit path.
+pub(crate) fn with_terminal<T>(
+    run: impl FnOnce(&mut Terminal<CrosstermBackend<io::Stdout>>) -> anyhow::Result<T>,
+) -> anyhow::Result<T> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     if execute!(stdout, EnterAlternateScreen).is_err() {
         let _ = disable_raw_mode();
         anyhow::bail!("failed to enter the alternate screen");
     }
-    let backend = CrosstermBackend::new(stdout);
-    let mut terminal = match Terminal::new(backend) {
+    let mut terminal = match Terminal::new(CrosstermBackend::new(stdout)) {
         Ok(terminal) => terminal,
         Err(err) => {
             let _ = disable_raw_mode();
@@ -355,15 +355,17 @@ pub fn run() -> anyhow::Result<TuiOutcome> {
             return Err(err.into());
         }
     };
-
-    let mut app = App::new();
-    let flow = event_loop(&mut terminal, &mut app);
-
+    let result = run(&mut terminal);
     let _ = disable_raw_mode();
     let _ = execute!(terminal.backend_mut(), LeaveAlternateScreen);
     let _ = terminal.show_cursor();
-    flow?;
+    result
+}
 
+/// Run the form. The terminal is restored on every exit path.
+pub fn run() -> anyhow::Result<TuiOutcome> {
+    let mut app = App::new();
+    with_terminal(|terminal| event_loop(terminal, &mut app))?;
     if app.cancelled {
         return Ok(TuiOutcome::Cancelled);
     }
@@ -422,7 +424,7 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &App) {
     idx += 1;
     if live.is_some() {
         frame.render_widget(
-            Paragraph::new(random_face())
+            Paragraph::new(face_for(&app.date_buf))
                 .style(Style::default().fg(Color::Red))
                 .alignment(Alignment::Center),
             rows[idx],
@@ -476,7 +478,8 @@ fn field_cursor(app: &App, field: Field) -> Option<usize> {
     (app.focus == field).then_some(app.cursor)
 }
 
-fn centered(area: Rect, width: u16, height: u16) -> Rect {
+/// Center a fixed `width`x`height` block inside `area`, clamped when small.
+pub(crate) fn centered(area: Rect, width: u16, height: u16) -> Rect {
     let width = width.min(area.width);
     let height = height.min(area.height);
     Rect {
@@ -511,7 +514,9 @@ fn render_input(
     let (crow, ccol) = cursor
         .map(|idx| (idx / inner_w, idx % inner_w))
         .unwrap_or((0, 0));
-    let offset = crow.saturating_sub(inner_h.saturating_sub(1));
+    let offset = crow
+        .saturating_sub(inner_h.saturating_sub(1))
+        .min(rows.len().saturating_sub(inner_h));
     let visible: Vec<Line> = rows
         .iter()
         .skip(offset)
@@ -525,8 +530,8 @@ fn render_input(
     frame.render_widget(Paragraph::new(visible).block(block), area);
     if focused {
         frame.set_cursor_position((
-            area.x + 1 + ccol as u16,
-            area.y + 1 + (crow - offset) as u16,
+            area.x + 1 + ccol.min(inner_w.saturating_sub(1)) as u16,
+            area.y + 1 + crow.saturating_sub(offset).min(inner_h.saturating_sub(1)) as u16,
         ));
     }
 }
@@ -736,7 +741,6 @@ mod tests {
 
     #[test]
     fn time_arrows_snap_to_quarters() {
-        use crate::event::shift_time_of_day;
         use chrono::Timelike;
         let mut app = App::new();
         app.handle_key(key(KeyCode::Tab));
@@ -749,7 +753,7 @@ mod tests {
         // On a mark it keeps stepping.
         app.handle_key(key(KeyCode::Right));
         let second = NaiveTime::parse_from_str(&app.time_buf, "%H:%M").unwrap();
-        assert_eq!(second, shift_time_of_day(first, 15));
+        assert_eq!(second, snap_quarter(first, true));
         // Behind mirrors it.
         app.handle_key(key(KeyCode::Left));
         assert_eq!(
@@ -893,5 +897,23 @@ mod tests {
             let has_face = DATE_FACES.iter().any(|face| text.contains(face));
             assert_eq!(has_face, app.date_buf == "2020-01-01");
         }
+    }
+
+    #[test]
+    fn single_line_input_keeps_text_visible_at_exact_width() {
+        use ratatui::backend::TestBackend;
+        let mut app = App::new();
+        type_text(&mut app, &"x".repeat(62));
+        let backend = TestBackend::new(80, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+        let text: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(text.contains(&"x".repeat(62)));
     }
 }

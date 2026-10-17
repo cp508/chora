@@ -6,10 +6,11 @@ use std::process::Command;
 use crate::error::ChoraError;
 
 /// Open `target` and wait for exit. Empty config and `$EDITOR` is an error.
-pub fn open(target: &Path, cwd: &Path, configured: Option<&str>) -> anyhow::Result<()> {
-    let raw = match configured {
-        Some(cmd) if !cmd.trim().is_empty() => cmd.to_owned(),
-        _ => std::env::var("EDITOR").unwrap_or_default(),
+pub fn open(target: &Path, cwd: &Path, configured: &str) -> anyhow::Result<()> {
+    let raw = if !configured.trim().is_empty() {
+        configured.to_owned()
+    } else {
+        std::env::var("EDITOR").unwrap_or_default()
     };
     let mut parts =
         shell_words::split(&raw).map_err(|err| ChoraError::EditorSpawn(err.to_string()))?;

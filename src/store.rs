@@ -35,11 +35,6 @@ impl Store {
         self.root.join("events")
     }
 
-    /// Old location, moved to `events/` once.
-    fn calendar_legacy_dir(&self) -> PathBuf {
-        self.root.join("calendar")
-    }
-
     #[must_use]
     pub fn notes_dir(&self) -> PathBuf {
         self.root.join("notes")
@@ -58,21 +53,9 @@ impl Store {
             .join(format!("{}.md", date.format("%Y-%m-%d")))
     }
 
-    /// Idempotent. Moves a pre-rename `calendar/` to `events/` once.
+    /// Idempotent. Creates `events/` and `notes/` when missing.
     pub fn ensure_layout(&self) -> anyhow::Result<()> {
-        let legacy = self.calendar_legacy_dir();
-        let events = self.events_dir();
-        if legacy.exists() && !events.exists() {
-            std::fs::rename(&legacy, &events).with_context(|| {
-                format!(
-                    "failed to move {} to {}",
-                    legacy.display(),
-                    events.display()
-                )
-            })?;
-            crate::debug_log!("moved {} to {}", legacy.display(), events.display());
-        }
-        for dir in [events, self.notes_dir()] {
+        for dir in [self.events_dir(), self.notes_dir()] {
             std::fs::create_dir_all(&dir)
                 .with_context(|| format!("failed to create {}", dir.display()))?;
         }
@@ -133,6 +116,9 @@ impl Store {
                 }
                 OldEventPolicy::Backlog => {
                     let dest = self.backlog_dir().join(&name);
+                    if dest.exists() {
+                        continue;
+                    }
                     if let Some(parent) = dest.parent() {
                         std::fs::create_dir_all(parent)
                             .with_context(|| format!("failed to create {}", parent.display()))?;
@@ -281,18 +267,6 @@ mod tests {
         assert!(text.starts_with("# 2026-11-20\n"));
         assert!(text.contains("## A"));
         assert!(text.contains("## B"));
-    }
-
-    #[test]
-    fn ensure_layout_migrates_legacy_calendar() {
-        let tmp = tempfile::tempdir().unwrap();
-        let legacy = tmp.path().join("calendar");
-        std::fs::create_dir_all(&legacy).unwrap();
-        std::fs::write(legacy.join("2026-11-20.md"), "# 2026-11-20\n").unwrap();
-        let store = Store::new(tmp.path().to_path_buf());
-        store.ensure_layout().unwrap();
-        assert!(!legacy.exists());
-        assert!(store.day_path(date()).exists());
     }
 
     fn sweep_fixture() -> (tempfile::TempDir, Store) {

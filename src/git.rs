@@ -214,15 +214,11 @@ pub fn push(dir: &Path) -> anyhow::Result<()> {
     if !has_remote(dir) {
         return Ok(());
     }
-    let out = git(dir, &["push", "-q"])?;
+    let out = git(dir, &["push", "-q", "-u", "origin", "HEAD"])?;
     if out.status.success() {
-        return Ok(());
-    }
-    let upstream = git(dir, &["push", "-q", "-u", "origin", "HEAD"])?;
-    if upstream.status.success() {
         Ok(())
     } else {
-        Err(remote_err(stderr_of(&upstream)))
+        Err(remote_err(stderr_of(&out)))
     }
 }
 

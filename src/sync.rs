@@ -10,8 +10,8 @@ use std::time::Duration;
 
 use anyhow::Context;
 
+use crate::git;
 use crate::store::Store;
-use crate::{git, warn_log};
 
 /// Run `edit` (usually: block inside the editor) while committing dirty
 /// state every `every`. `Duration::ZERO` disables the timer. Commits are
@@ -33,11 +33,13 @@ pub fn with_auto_commit_every(
         // `Timeout` = checkpoint time. Anything else (sender dropped when
         // the editor closes) stops the timer quietly.
         while let Err(mpsc::RecvTimeoutError::Timeout) = stopped.recv_timeout(every) {
-            let _ = with_sync_lock(&root, || {
+            if let Err(err) = with_sync_lock(&root, || {
                 git::add_all(&root)?;
                 let _ = git::commit(&root, &message)?;
                 Ok(())
-            });
+            }) {
+                crate::debug_log!("auto-commit skipped: {err}");
+            }
         }
     });
     let result = edit();
@@ -82,66 +84,20 @@ pub fn sync_after_open(store: &Store, message: &str) -> anyhow::Result<()> {
     })
 }
 
-/// Serialize add/commit/pull/push across concurrent chora processes.
-/// The lock file holds the holder PID: a dead holder (killed process) is
-/// taken over immediately instead of stalling for a minute. A live holder
-/// waits up to 60s, then proceeds with a warning rather than blocking
-/// forever. Previous-generation dir locks are cleaned up.
+/// Serialize add/commit/pull/push across concurrent chora processes via
+/// a kernel file lock on `.git/chora-sync.lock` (released automatically by
+/// the OS if the holder exits or crashes).
 fn with_sync_lock(root: &Path, sync: impl FnOnce() -> anyhow::Result<()>) -> anyhow::Result<()> {
     let lock = root.join(".git").join("chora-sync.lock");
-    if lock.is_dir() {
-        let _ = std::fs::remove_dir(&lock);
-    }
-    let me = std::process::id().to_string();
-    let mut waited = 0;
-    loop {
-        match std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&lock)
-        {
-            Ok(mut file) => {
-                use std::io::Write;
-                let _ = writeln!(file, "{me}");
-                break;
-            }
-            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
-                if !holder_alive(&lock) {
-                    let _ = std::fs::remove_file(&lock);
-                    continue;
-                }
-                if waited >= 60 {
-                    warn_log!("sync lock is stale, proceeding anyway");
-                    break;
-                }
-                std::thread::sleep(std::time::Duration::from_secs(1));
-                waited += 1;
-            }
-            Err(err) => {
-                return Err(err).with_context(|| format!("failed to lock {}", lock.display()));
-            }
-        }
-    }
-    let result = sync();
-    let _ = std::fs::remove_file(&lock);
-    result
-}
-
-/// A lock whose PID is gone (or unreadable garbage) is stale.
-/// An unreadable file is treated as live — better a bounded wait than
-/// deleting a lock we cannot see.
-fn holder_alive(lock: &Path) -> bool {
-    let Ok(text) = std::fs::read_to_string(lock) else {
-        return true;
-    };
-    let Some(pid) = text
-        .split_whitespace()
-        .next()
-        .and_then(|pid| pid.parse::<u32>().ok())
-    else {
-        return false;
-    };
-    std::path::Path::new(&format!("/proc/{pid}")).exists()
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(&lock)
+        .with_context(|| format!("failed to open {}", lock.display()))?;
+    file.lock()
+        .with_context(|| format!("failed to lock {}", lock.display()))?;
+    sync()
 }
 
 #[cfg(test)]

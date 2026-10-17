@@ -79,7 +79,10 @@ fn branch(last: bool) -> &'static str {
 /// `guides` carries the ancestors' `│` bars; the last sibling closes them.
 fn push_children(cmd: &clap::Command, guides: &str, rows: &mut Vec<Row>) {
     let args: Vec<_> = cmd.get_arguments().filter(|arg| visible_arg(arg)).collect();
-    let subs: Vec<_> = cmd.get_subcommands().collect();
+    let subs: Vec<_> = cmd
+        .get_subcommands()
+        .filter(|sub| !sub.is_hide_set())
+        .collect();
     let total = args.len() + subs.len();
     for (index, arg) in args.iter().enumerate() {
         rows.push(Row {
@@ -104,11 +107,13 @@ fn push_children(cmd: &clap::Command, guides: &str, rows: &mut Vec<Row>) {
     }
 }
 
-/// The whole tree: schema subcommands plus the hand-parsed `completion`
-/// (outside the clap schema, but still user-facing).
+/// The whole tree: built directly from the clap schema.
 fn build_rows() -> Vec<Row> {
     let mut rows = Vec::new();
-    for sub in Cli::command().get_subcommands() {
+    for sub in Cli::command()
+        .get_subcommands()
+        .filter(|sub| !sub.is_hide_set())
+    {
         rows.push(Row {
             prefix: String::from("  • "),
             command: true,
@@ -118,25 +123,6 @@ fn build_rows() -> Vec<Row> {
         });
         push_children(sub, "  ", &mut rows);
     }
-    rows.push(Row {
-        prefix: String::from("  • "),
-        command: true,
-        new_group: true,
-        head: String::from("completion"),
-        about: String::from("print shell completions to stdout"),
-    });
-    let shells = COMPLETION_SHELLS
-        .iter()
-        .map(|(name, _)| *name)
-        .collect::<Vec<_>>()
-        .join("|");
-    rows.push(Row {
-        prefix: String::from("  └── "),
-        command: false,
-        new_group: false,
-        head: format!("<{shells}>"),
-        about: String::from("which shell to complete"),
-    });
     rows
 }
 
@@ -163,114 +149,74 @@ fn row_line(row: &Row) -> String {
     }
 }
 
-/// Headers: `Commands:`, `Annotation:`, `Options:`. Footnotes stay dim.
-fn header_style() -> anstyle::Style {
-    anstyle::Style::new()
-        .bold()
-        .fg_color(Some(anstyle::Color::Ansi(anstyle::AnsiColor::Yellow)))
-}
+const HEADER_STYLE: &str = "\x1b[1m\x1b[33m";
+const COMMAND_STYLE: &str = "\x1b[1m\x1b[34m";
+const ARG_STYLE: &str = "\x1b[32m";
+const DIM_STYLE: &str = "\x1b[2m";
+const GRAY_STYLE: &str = "\x1b[90m";
+const RESET: &str = "\x1b[0m";
 
-/// Commands: bold blue.
-fn command_style() -> anstyle::Style {
-    anstyle::Style::new()
-        .bold()
-        .fg_color(Some(anstyle::Color::Ansi(anstyle::AnsiColor::Blue)))
-}
-
-/// Arguments: plain green.
-fn arg_style() -> anstyle::Style {
-    anstyle::Style::new().fg_color(Some(anstyle::Color::Ansi(anstyle::AnsiColor::Green)))
-}
-
-fn dim_style() -> anstyle::Style {
-    anstyle::Style::new().dimmed()
-}
-
-/// Placeholders like `<DATE>`: gray.
-fn gray_style() -> anstyle::Style {
-    anstyle::Style::new().fg_color(Some(anstyle::Color::Ansi(anstyle::AnsiColor::BrightBlack)))
-}
-
-fn paint(style: anstyle::Style, text: &str) -> String {
-    format!("{style}{text}{style:#}")
+fn paint(colored: bool, style: &str, text: &str) -> String {
+    if colored {
+        format!("{style}{text}{RESET}")
+    } else {
+        text.to_owned()
+    }
 }
 
 /// Paint a head: `<...>` placeholders go gray, the rest keeps the row style.
-fn paint_head(head: &str, base: anstyle::Style) -> String {
+fn paint_head(colored: bool, head: &str, base: &str) -> String {
+    if !colored {
+        return head.to_owned();
+    }
     let mut out = String::new();
     let mut rest = head;
     while let Some(start) = rest.find('<') {
         let (plain, tail) = rest.split_at(start);
         if !plain.is_empty() {
-            out.push_str(&paint(base, plain));
+            out.push_str(&paint(true, base, plain));
         }
         match tail.find('>') {
             Some(end) => {
                 let (placeholder, after) = tail.split_at(end + 1);
-                out.push_str(&paint(gray_style(), placeholder));
+                out.push_str(&paint(true, GRAY_STYLE, placeholder));
                 rest = after;
             }
             None => {
-                out.push_str(&paint(base, tail));
+                out.push_str(&paint(true, base, tail));
                 rest = "";
             }
         }
     }
     if !rest.is_empty() {
-        out.push_str(&paint(base, rest));
-    }
-    out
-}
-
-/// Plain text, no colors. Pure: the single source for tests and pipes.
-fn help_text_plain() -> String {
-    let cmd = Cli::command();
-    let mut out = format!("{} - {}\n", cmd.get_name(), about_of(&cmd));
-    out.push_str("\nCommands:\n");
-    let mut first_group = true;
-    for row in build_rows() {
-        if row.new_group && !first_group {
-            out.push('\n');
-        }
-        first_group = false;
-        out.push_str(&row_line(&row));
-        out.push('\n');
-    }
-    out.push_str("\nAnnotation:\n");
-    for line in ANNOTATION {
-        out.push_str(line);
-        out.push('\n');
-    }
-    out.push_str("\nOptions:\n");
-    for row in global_options() {
-        out.push_str(&row_line(&row));
-        out.push('\n');
+        out.push_str(&paint(true, base, rest));
     }
     out
 }
 
 /// Paint one row: guides stay plain, the head keeps its style
 /// with gray `<...>` placeholders.
-fn paint_row(row: &Row, style: anstyle::Style) -> String {
+fn paint_row(colored: bool, row: &Row, style: &str) -> String {
     let line = row_line(row);
+    if !colored {
+        return line;
+    }
     let head_start = line.find(&row.head).unwrap_or(0);
     let mut out = String::from(&line[..head_start]);
-    out.push_str(&paint_head(&row.head, style));
+    out.push_str(&paint_head(true, &row.head, style));
     out.push_str(&line[head_start + row.head.len()..]);
     out
 }
 
-/// Same text with colors: headers yellow, commands blue bold, args green.
-fn help_text_colored() -> String {
+/// Render the CLI help tree: plain when `colored == false`, ANSI-styled when `true`.
+fn help_text(colored: bool) -> String {
     let cmd = Cli::command();
     let mut out = format!(
-        "{} - {}\n",
-        paint(command_style(), cmd.get_name()),
-        about_of(&cmd)
+        "{} - {}\n\n{}\n",
+        paint(colored, COMMAND_STYLE, cmd.get_name()),
+        about_of(&cmd),
+        paint(colored, HEADER_STYLE, "Commands:")
     );
-    out.push('\n');
-    out.push_str(&paint(header_style(), "Commands:"));
-    out.push('\n');
     let mut first_group = true;
     for row in build_rows() {
         if row.new_group && !first_group {
@@ -278,25 +224,24 @@ fn help_text_colored() -> String {
         }
         first_group = false;
         let style = if row.command {
-            command_style()
+            COMMAND_STYLE
         } else {
-            arg_style()
+            ARG_STYLE
         };
-        out.push_str(&paint_row(&row, style));
+        out.push_str(&paint_row(colored, &row, style));
         out.push('\n');
     }
-    out.push('\n');
-    out.push_str(&paint(header_style(), "Annotation:"));
-    out.push('\n');
+    out.push_str(&format!(
+        "\n{}\n",
+        paint(colored, HEADER_STYLE, "Annotation:")
+    ));
     for line in ANNOTATION {
-        out.push_str(&paint(dim_style(), line));
+        out.push_str(&paint(colored, DIM_STYLE, line));
         out.push('\n');
     }
-    out.push('\n');
-    out.push_str(&paint(header_style(), "Options:"));
-    out.push('\n');
+    out.push_str(&format!("\n{}\n", paint(colored, HEADER_STYLE, "Options:")));
     for row in global_options() {
-        out.push_str(&paint_row(&row, arg_style()));
+        out.push_str(&paint_row(colored, &row, ARG_STYLE));
         out.push('\n');
     }
     out
@@ -311,22 +256,14 @@ fn use_color(stream_is_terminal: bool) -> bool {
 #[must_use]
 pub fn render_help_tree() -> String {
     use std::io::IsTerminal;
-    if use_color(std::io::stdout().is_terminal()) {
-        help_text_colored()
-    } else {
-        help_text_plain()
-    }
+    help_text(use_color(std::io::stdout().is_terminal()))
 }
 
 /// Same tree for parse errors (stderr): colored on a terminal, plain otherwise.
 #[must_use]
 pub fn render_help_tree_for_stderr() -> String {
     use std::io::IsTerminal;
-    if use_color(std::io::stderr().is_terminal()) {
-        help_text_colored()
-    } else {
-        help_text_plain()
-    }
+    help_text(use_color(std::io::stderr().is_terminal()))
 }
 
 /// `chora [--dir <path>] [--debug] <command>`. No command prints the tree.
@@ -379,18 +316,11 @@ pub enum EventAction {
 }
 
 /// Shells with generated completions.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum CompletionShell {
     Bash,
     Fish,
 }
-
-/// Single source for the shell names: the hand parser and the tree below
-/// both read this, so they cannot drift apart.
-const COMPLETION_SHELLS: [(&str, CompletionShell); 2] = [
-    ("bash", CompletionShell::Bash),
-    ("fish", CompletionShell::Fish),
-];
 
 /// chora subcommands.
 #[derive(Debug, Subcommand)]
@@ -420,65 +350,13 @@ pub enum Cmd {
     /// Month calendar with event markers. Read-only.
     #[command(disable_help_flag = true)]
     Calendar,
-}
-
-/// `chora completion|completions <bash|fish>`, parsed by hand (not a clap
-/// subcommand) so it never leaks into generated shell completions.
-pub fn take_completion(
-    args: impl IntoIterator<Item = std::ffi::OsString>,
-) -> Option<CompletionShell> {
-    use std::ffi::OsStr;
-
-    let args: Vec<_> = args.into_iter().collect();
-    let (name, shell) = match args.as_slice() {
-        [name, shell] => (name, shell),
-        _ => return None,
-    };
-    if name.as_os_str() != OsStr::new("completion") && name.as_os_str() != OsStr::new("completions")
-    {
-        return None;
-    }
-    let shell = shell.as_os_str().to_str()?;
-    COMPLETION_SHELLS
-        .iter()
-        .find(|(known, _)| *known == shell)
-        .map(|(_, parsed)| *parsed)
-}
-
-/// Internal background child, built by `spawn_sync_child`:
-/// `chora [--dir <PATH>] sync-after-open --message <MSG>`.
-/// Parsed by hand (not a clap subcommand) so it never leaks into
-/// generated shell completions or help.
-#[derive(Debug, PartialEq, Eq)]
-pub struct SyncAfterOpen {
-    pub dir: Option<PathBuf>,
-    pub message: String,
-}
-
-pub fn take_sync_after_open(
-    args: impl IntoIterator<Item = std::ffi::OsString>,
-) -> Option<SyncAfterOpen> {
-    use std::ffi::OsStr;
-
-    let args: Vec<_> = args.into_iter().collect();
-    let (dir, rest) = match args.as_slice() {
-        [flag, path, rest @ ..] if flag.as_os_str() == OsStr::new("--dir") => {
-            (Some(PathBuf::from(path)), rest)
-        }
-        rest => (None, rest),
-    };
-    match rest {
-        [cmd, flag, msg]
-            if cmd.as_os_str() == OsStr::new("sync-after-open")
-                && flag.as_os_str() == OsStr::new("--message") =>
-        {
-            Some(SyncAfterOpen {
-                dir,
-                message: msg.to_str()?.to_owned(),
-            })
-        }
-        _ => None,
-    }
+    /// Print shell completions to stdout.
+    #[command(alias = "completions", disable_help_flag = true)]
+    Completion {
+        /// Which shell to complete.
+        #[arg(value_enum, value_name = "bash|fish")]
+        shell: CompletionShell,
+    },
 }
 
 /// Today (local date).
@@ -528,7 +406,7 @@ mod tests {
     #[test]
     fn tree_lists_every_schema_subcommand() {
         fn collect(cmd: &clap::Command, names: &mut Vec<String>) {
-            for sub in cmd.get_subcommands() {
+            for sub in cmd.get_subcommands().filter(|sub| !sub.is_hide_set()) {
                 names.push(sub.get_name().to_owned());
                 collect(sub, names);
             }
@@ -536,29 +414,29 @@ mod tests {
         let mut names = Vec::new();
         collect(&Cli::command(), &mut names);
         assert!(!names.is_empty());
-        let plain = help_text_plain();
+        let plain = help_text(false);
         for name in names {
             assert!(plain.contains(&name), "tree misses `{name}`");
         }
-        // Hand-parsed, outside the schema — still shown.
         for token in ["completion", "<bash|fish>", "--dir <PATH>", "--debug"] {
             assert!(plain.contains(token), "tree misses `{token}`");
         }
+        assert!(!plain.contains("sync-after-open"));
     }
 
     #[test]
     fn tree_paints_commands_blue_bold_and_args_green() {
-        let colored = help_text_colored();
+        let colored = help_text(true);
         // Bold blue command, plain green argument, gray placeholder.
         assert!(colored.contains("\u{1b}[1m\u{1b}[34minit"));
         assert!(colored.contains("\u{1b}[32m--date "));
         assert!(colored.contains("\u{1b}[90m<DATE>"));
-        assert_eq!(strip_ansi(&colored), help_text_plain());
+        assert_eq!(strip_ansi(&colored), help_text(false));
     }
 
     #[test]
     fn tree_has_title_annotation_and_options() {
-        let plain = help_text_plain();
+        let plain = help_text(false);
         let mut lines = plain.lines();
         assert!(lines.next().unwrap().starts_with("chora - "));
         assert!(plain.contains("\nCommands:\n"));
@@ -578,12 +456,11 @@ mod tests {
     fn readme_lists_every_command() {
         const README: &str = include_str!("../README.md");
         fn collect(cmd: &clap::Command, names: &mut Vec<String>) {
-            for sub in cmd.get_subcommands() {
+            for sub in cmd.get_subcommands().filter(|sub| !sub.is_hide_set()) {
                 names.push(sub.get_name().to_owned());
                 collect(sub, names);
             }
         }
-        // `completion` is hand-parsed outside the schema, but documented.
         let mut names = vec![String::from("completion")];
         collect(&Cli::command(), &mut names);
         assert!(!names.is_empty());
@@ -650,81 +527,32 @@ mod tests {
 
     #[test]
     fn completion_parses_both_names() {
-        use std::ffi::OsString;
-
         for name in ["completion", "completions"] {
-            assert_eq!(
-                take_completion([name, "bash"].map(OsString::from)),
-                Some(CompletionShell::Bash)
-            );
-            assert_eq!(
-                take_completion([name, "fish"].map(OsString::from)),
-                Some(CompletionShell::Fish)
-            );
+            let cli = Cli::try_parse_from(["chora", name, "bash"]).unwrap();
+            assert!(matches!(
+                cli.cmd,
+                Some(Cmd::Completion {
+                    shell: CompletionShell::Bash
+                })
+            ));
+            let cli = Cli::try_parse_from(["chora", name, "fish"]).unwrap();
+            assert!(matches!(
+                cli.cmd,
+                Some(Cmd::Completion {
+                    shell: CompletionShell::Fish
+                })
+            ));
         }
     }
 
     #[test]
-    fn completion_rejects_other_shapes() {
-        use std::ffi::OsString;
-
+    fn completion_rejects_invalid_shell() {
         for args in [
-            vec!["completion"],
-            vec!["completion", "zsh"],
-            vec!["completion", "bash", "extra"],
-            vec!["open", "note"],
-            vec!["event", "show"],
+            &["chora", "completion"][..],
+            &["chora", "completion", "zsh"][..],
+            &["chora", "completion", "bash", "extra"][..],
         ] {
-            assert!(
-                take_completion(args.iter().map(OsString::from)).is_none(),
-                "{args:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn sync_after_open_parses_full_shape() {
-        let args = [
-            "--dir",
-            "/tmp/c",
-            "sync-after-open",
-            "--message",
-            "open: note",
-        ];
-        assert_eq!(
-            take_sync_after_open(args.map(std::ffi::OsString::from)),
-            Some(SyncAfterOpen {
-                dir: Some(PathBuf::from("/tmp/c")),
-                message: String::from("open: note"),
-            })
-        );
-    }
-
-    #[test]
-    fn sync_after_open_parses_without_dir() {
-        let args = ["sync-after-open", "--message", "event: 2026-11-20"];
-        assert_eq!(
-            take_sync_after_open(args.map(std::ffi::OsString::from)),
-            Some(SyncAfterOpen {
-                dir: None,
-                message: String::from("event: 2026-11-20"),
-            })
-        );
-    }
-
-    #[test]
-    fn sync_after_open_rejects_other_shapes() {
-        for args in [
-            vec!["open", "note"],
-            vec!["sync-after-open"],
-            vec!["sync-after-open", "--message"],
-            vec!["--dir", "/tmp/c", "sync-after-open"],
-            vec!["event", "show"],
-        ] {
-            assert!(
-                take_sync_after_open(args.iter().map(std::ffi::OsString::from)).is_none(),
-                "{args:?}"
-            );
+            assert!(Cli::try_parse_from(args).is_err(), "{args:?}");
         }
     }
 

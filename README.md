@@ -56,7 +56,7 @@ Duration: 10m
 Arbitrary context.
 ```
 
-- `Time:` — `HH:MM` (the TUI also accepts shorthands: `930`, `9`, `now`, `+30`).
+- `Time:` — `HH:MM`.
 - `Duration:` — `10s`, `45m`, `2h`, `1h30m`.
 - Sections without valid `Time:`/`Duration:` are plain day text, skipped silently.
 - Day output is sorted by time; repeatables are mixed in with no markers.
@@ -71,7 +71,7 @@ Arbitrary context.
 - Child log: `<data-dir>/chora/sync.log` (usually `~/.local/share/chora/sync.log`); every run is separated by a timestamp header.
 - Conflicts are never auto-resolved: the error lands in `sync.log` tagged `diverged`, the repository stays mid-rebase — fix it by hand inside the storage (`git rebase --abort` / `--continue`).
 - First run on a new device: `fetch` + `checkout` of the remote branch before `.gitignore` is created (otherwise checkout would trip over the untracked file).
-- Concurrent runs serialize on the `.git/chora-sync.lock` lock (a file holding a PID; a dead holder is detected via `/proc`, a live one is waited on for up to 60 seconds).
+- Concurrent runs serialize on the `.git/chora-sync.lock` kernel file lock.
 - The first push sets upstream (`-u`); afterwards plain manual `git pull`/`git push` work.
 
 ## Config
@@ -91,6 +91,7 @@ remote_url = ""  # SSH remote. Empty = local-only git.
 day_color = "green"  # color for events recorded on that date. Terminal palette: black, red, green, yellow, blue, magenta, cyan, white, gray, darkgray, lightred, lightgreen, lightyellow, lightblue, lightmagenta, lightcyan.
 repeat_color = "blue"  # color for weekday repeatables. Same palette.
 show_repeat = true  # mark weekday repeatables on the calendar. false = day events only.
+fixed_cells = false  # fixed 6x3 cells (square on typical fonts) instead of full-width stretch.
 header = "%A, %d.%m.%Y"  # strftime format of the selected date, top-left of the calendar. NONE hides the header row.
 show_today = true  # today hint, top-right, only when looking at another date.
 ```

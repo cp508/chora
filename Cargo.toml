@@ -15,7 +15,6 @@ path = "src/lib.rs"
 
 [dependencies]
 anyhow = "1"
-anstyle = "1"
 chrono = "0.4"
 clap = { version = "4", features = ["derive"] }
 clap_complete = "4"

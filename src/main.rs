@@ -13,14 +13,8 @@ use chora::{calendar, editor, event, git, output, sync, tui};
 use clap::Parser;
 
 fn main() -> anyhow::Result<()> {
-    // Internal background child first: it is not a clap subcommand, so it
-    // never leaks into help or generated shell completions.
-    if let Some(internal) = chora::cli::take_sync_after_open(std::env::args_os().skip(1)) {
-        return cmd_sync_after_open(internal.dir.as_deref(), &internal.message);
-    }
-    // Same story: hand-parsed, invisible to generated completions.
-    if let Some(shell) = chora::cli::take_completion(std::env::args_os().skip(1)) {
-        return cmd_completion(shell);
+    if let Ok(message) = std::env::var("CHORA_SYNC_AFTER_OPEN") {
+        return cmd_sync_after_open(&message);
     }
     // Invalid input shows the same tree as bare `chora`, then the error.
     let cli = match Cli::try_parse() {
@@ -45,6 +39,7 @@ fn main() -> anyhow::Result<()> {
     };
     match cmd {
         Cmd::Init => cmd_init(),
+        Cmd::Completion { shell } => cmd_completion(shell),
         Cmd::Open { target } => {
             let (cfg, store) = load_store(cli.dir.as_deref(), true)?;
             require_repo(&store)?;
@@ -61,9 +56,9 @@ fn main() -> anyhow::Result<()> {
                 sweep_old_events(&store, &cfg)?;
             }
             sync::with_auto_commit(store.root(), cfg.main.auto_commit, name, || {
-                editor::open(&dir, &dir, dirs_opener(&cfg))
+                editor::open(&dir, &dir, &cfg.main.open_dirs)
             })?;
-            sync_in_background(&store, cli.dir.as_deref(), &format!("open: {name}"))
+            sync_in_background(&store, &format!("open: {name}"))
         }
         Cmd::Calendar => {
             let (cfg, store) = load_store(cli.dir.as_deref(), false)?;
@@ -85,12 +80,11 @@ fn main() -> anyhow::Result<()> {
                 None => {
                     let (cfg, store) = load_store(cli.dir.as_deref(), true)?;
                     require_repo(&store)?;
-                    let open = files_opener(&cfg);
                     match date {
-                        Some(raw) => cmd_event_stub(&store, &cfg, &raw, open, cli.dir.as_deref()),
+                        Some(raw) => cmd_event_stub(&store, &cfg, &raw),
                         // Bare `event` is the TUI form; `--confirm` opens
                         // the day file after submit.
-                        None => cmd_event_tui(&store, &cfg, confirm, open, cli.dir.as_deref()),
+                        None => cmd_event_tui(&store, &cfg, confirm),
                     }
                 }
             }
@@ -100,8 +94,8 @@ fn main() -> anyhow::Result<()> {
 
 /// The detached background child: commit the exit state, rebase onto fresh
 /// remote work, push. Failures land in `sync.log` via redirected stderr.
-fn cmd_sync_after_open(dir: Option<&Path>, message: &str) -> anyhow::Result<()> {
-    let (_cfg, store) = load_store(dir, true)?;
+fn cmd_sync_after_open(message: &str) -> anyhow::Result<()> {
+    let store = Store::new(std::env::current_dir()?);
     require_repo(&store)?;
     // Timestamp header: the log is append-only, runs must delimit.
     eprintln!(
@@ -130,19 +124,6 @@ fn load_store(dir: Option<&Path>, bootstrap: bool) -> anyhow::Result<(Config, St
         store.ensure_gitignore()?;
     }
     Ok((cfg, store))
-}
-
-fn files_opener(cfg: &Config) -> Option<&str> {
-    picked(&cfg.main.editor)
-}
-
-fn dirs_opener(cfg: &Config) -> Option<&str> {
-    picked(&cfg.main.open_dirs)
-}
-
-fn picked(raw: &str) -> Option<&str> {
-    let cmd = raw.trim();
-    (!cmd.is_empty()).then_some(cmd)
 }
 
 fn require_repo(store: &Store) -> anyhow::Result<()> {
@@ -176,7 +157,7 @@ fn sweep_old_events(store: &Store, cfg: &Config) -> anyhow::Result<()> {
 /// the terminal does not kill the push: nothing to wait out.
 /// Falls back to a foreground sync when no spawn works, so no edit is ever
 /// lost silently.
-fn sync_in_background(store: &Store, dir: Option<&Path>, message: &str) -> anyhow::Result<()> {
+fn sync_in_background(store: &Store, message: &str) -> anyhow::Result<()> {
     let exe = std::env::current_exe().context("failed to locate the chora binary")?;
     let log = sync_log_path()?;
     if let Some(parent) = log.parent() {
@@ -189,7 +170,7 @@ fn sync_in_background(store: &Store, dir: Option<&Path>, message: &str) -> anyho
         .append(true)
         .open(&log)
         .with_context(|| format!("failed to open {}", log.display()))?;
-    match spawn_sync_child(&exe, dir, message, store.root(), log_file) {
+    match spawn_sync_child(&exe, message, store.root(), log_file) {
         Ok(_) => {
             println!("syncing in background (log: {})", log.display());
             Ok(())
@@ -208,19 +189,15 @@ fn sync_in_background(store: &Store, dir: Option<&Path>, message: &str) -> anyho
 /// No new deps, no waiting.
 fn spawn_sync_child(
     exe: &Path,
-    dir: Option<&Path>,
     message: &str,
     root: &Path,
     log_file: std::fs::File,
 ) -> std::io::Result<std::process::Child> {
     use std::os::unix::process::CommandExt;
-    let mut cmd = std::process::Command::new("setsid");
-    cmd.arg(exe);
-    if let Some(dir) = dir {
-        cmd.arg("--dir").arg(dir);
-    }
-    cmd.arg("sync-after-open").arg("--message").arg(message);
-    cmd.stdin(std::process::Stdio::null())
+    std::process::Command::new("setsid")
+        .arg(exe)
+        .env("CHORA_SYNC_AFTER_OPEN", message)
+        .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(log_file)
         .current_dir(root)
@@ -281,6 +258,7 @@ fn cmd_calendar(store: &Store, cfg: &Config, dir: Option<&Path>) -> anyhow::Resu
         day_color: day,
         repeat_color: repeat,
         show_repeat: cfg.calendar.show_repeat,
+        fixed_cells: cfg.calendar.fixed_cells,
         header: cfg.calendar.header.clone(),
         show_today: cfg.calendar.show_today,
     };
@@ -289,7 +267,7 @@ fn cmd_calendar(store: &Store, cfg: &Config, dir: Option<&Path>) -> anyhow::Resu
     };
     let (cfg, store) = load_store(dir, true)?;
     require_repo(&store)?;
-    open_day_file(&store, &cfg, date, files_opener(&cfg), dir)
+    open_day_file(&store, &cfg, date)
 }
 
 /// Read-only show: one day (plus its repeatables) or all days.
@@ -332,47 +310,31 @@ fn cmd_event_show(store: &Store, raw: Option<&str>, json: bool) -> anyhow::Resul
     Ok(())
 }
 
-fn cmd_event_stub(
-    store: &Store,
-    cfg: &Config,
-    raw: &str,
-    open: Option<&str>,
-    dir: Option<&Path>,
-) -> anyhow::Result<()> {
+fn cmd_event_stub(store: &Store, cfg: &Config, raw: &str) -> anyhow::Result<()> {
     let day = parse_date_arg(raw)?;
-    open_day_file(store, cfg, day, open, dir)
+    open_day_file(store, cfg, day)
 }
 
 /// Append a stub to the day file and open it in the file opener.
 /// Shared by `event --date` and calendar `Enter`.
-fn open_day_file(
-    store: &Store,
-    cfg: &Config,
-    day: chrono::NaiveDate,
-    open: Option<&str>,
-    dir: Option<&Path>,
-) -> anyhow::Result<()> {
+fn open_day_file(store: &Store, cfg: &Config, day: chrono::NaiveDate) -> anyhow::Result<()> {
     // No network up here: the opener must start instantly. Fresh remote
     // work merges in the detached child on exit (rebase heals fast-forwards;
     // real conflicts land loudly in `sync.log`).
-    sweep_old_events(store, cfg)?;
+    if day >= today() {
+        sweep_old_events(store, cfg)?;
+    }
     let path = store.ensure_day_file(day)?;
     store.append_section(day, "## \nTime: \nDuration: \n")?;
     sync::with_auto_commit(store.root(), cfg.main.auto_commit, "event", || {
-        editor::open(&path, store.root(), open)
+        editor::open(&path, store.root(), &cfg.main.editor)
     })?;
     // Same detach as `open` on exit: the shell is back instantly, the
     // commit + rebase + push finish in the background child.
-    sync_in_background(store, dir, &format!("event: {}", day.format("%Y-%m-%d")))
+    sync_in_background(store, &format!("event: {}", day.format("%Y-%m-%d")))
 }
 
-fn cmd_event_tui(
-    store: &Store,
-    cfg: &Config,
-    confirm: bool,
-    open: Option<&str>,
-    dir: Option<&Path>,
-) -> anyhow::Result<()> {
+fn cmd_event_tui(store: &Store, cfg: &Config, confirm: bool) -> anyhow::Result<()> {
     let data = match tui::run()? {
         tui::TuiOutcome::Cancelled => return Ok(()),
         tui::TuiOutcome::Submitted(data) => data,
@@ -391,13 +353,11 @@ fn cmd_event_tui(
     store.append_section(data.date, &rendered)?;
     let message = format!("event: {} {}", data.date.format("%Y-%m-%d"), data.title);
     sweep_old_events(store, cfg)?;
-    sync_in_background(store, dir, &message)?;
     if confirm {
         let path = store.ensure_day_file(data.date)?;
         sync::with_auto_commit(store.root(), cfg.main.auto_commit, "event", || {
-            editor::open(&path, store.root(), open)
+            editor::open(&path, store.root(), &cfg.main.editor)
         })?;
-        sync_in_background(store, dir, &message)?;
     }
-    Ok(())
+    sync_in_background(store, &message)
 }

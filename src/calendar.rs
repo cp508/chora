@@ -1,22 +1,17 @@
 //! `calendar`: a read-only month-grid TUI (ratatui + crossterm).
 //!
 //! One cell per day: the first event title above the day number.
+//! `fixed_cells` pins 6x3 cells (square on typical fonts) centered in
+//! the terminal; by default cells stretch over the full width.
 //! Events from the day file use `day_color`, weekday repeatables use
 //! `repeat_color` (a day with both shows the day event). Arrows/hjkl move
 //! the selection across month borders, `t` jumps to today, `q`/`Esc` quit.
 
-use std::io;
 use std::path::{Path, PathBuf};
 
 use chrono::{Datelike, NaiveDate};
-use crossterm::{
-    event::{self, Event as CrosstermEvent, KeyCode},
-    execute,
-    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
-};
+use crossterm::event::{self, Event as CrosstermEvent, KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
-    Terminal,
-    backend::CrosstermBackend,
     layout::{Alignment, Constraint, Direction, Layout},
     style::{Color, Style},
     text::{Line, Span},
@@ -26,6 +21,7 @@ use ratatui::{
 use crate::cli::today;
 use crate::event::parse_day;
 use crate::store::Store;
+use crate::tui::{centered, with_terminal};
 
 /// One of the 42 visible cells. `current` marks the shown month;
 /// border days from adjacent months render dimmed.
@@ -83,29 +79,17 @@ pub fn load_marks(
 ) -> anyhow::Result<Vec<DayMarks>> {
     let cells = month_grid(year, month).ok_or_else(|| anyhow::anyhow!("date out of range"))?;
     let store = Store::new(root.to_path_buf());
-    let first = cells
-        .first()
-        .map(|cell| cell.date)
-        .ok_or_else(|| anyhow::anyhow!("empty month grid"))?;
-    let sunday = first
-        .checked_sub_signed(chrono::Duration::days(
-            first.weekday().num_days_from_sunday() as i64,
-        ))
-        .ok_or_else(|| anyhow::anyhow!("date out of range"))?;
     let mut weekday_titles: Vec<Option<String>> = Vec::with_capacity(7);
-    for index in 0..7 {
-        if !show_repeat {
-            weekday_titles.push(None);
-            continue;
-        }
-        let probe = sunday
-            .checked_add_signed(chrono::Duration::days(index))
-            .ok_or_else(|| anyhow::anyhow!("date out of range"))?;
-        let title = store
-            .read_repeatables(probe)?
-            .into_iter()
-            .next()
-            .map(|event| event.title);
+    for cell in &cells[..7] {
+        let title = if show_repeat {
+            store
+                .read_repeatables(cell.date)?
+                .into_iter()
+                .next()
+                .map(|event| event.title)
+        } else {
+            None
+        };
         weekday_titles.push(title);
     }
     let mut marks = Vec::with_capacity(42);
@@ -169,6 +153,8 @@ pub struct Options {
     pub day_color: Color,
     pub repeat_color: Color,
     pub show_repeat: bool,
+    /// Fixed 6x3 cells (square on typical fonts) instead of full-width stretch.
+    pub fixed_cells: bool,
     /// `strftime` format of the selected date, top-left.
     pub header: String,
     /// Today hint, top-right, only when looking at another date.
@@ -239,6 +225,14 @@ impl App {
         Ok(())
     }
 
+    fn handle_key_event(&mut self, key: KeyEvent) -> anyhow::Result<()> {
+        if key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('c')) {
+            self.done = true;
+            return Ok(());
+        }
+        self.handle_key(key.code)
+    }
+
     fn handle_key(&mut self, code: KeyCode) -> anyhow::Result<()> {
         match code {
             KeyCode::Esc | KeyCode::Char('q') => self.done = true,
@@ -261,40 +255,30 @@ impl App {
 /// restored on every exit path. Returns the date to open when `Enter`
 /// was pressed (`None` on quit).
 pub fn run(root: &Path, options: Options) -> anyhow::Result<Option<NaiveDate>> {
-    enable_raw_mode()?;
-    let mut stdout = io::stdout();
-    if execute!(stdout, EnterAlternateScreen).is_err() {
-        let _ = disable_raw_mode();
-        anyhow::bail!("failed to enter the alternate screen");
-    }
-    let backend = CrosstermBackend::new(stdout);
-    let mut terminal = match Terminal::new(backend) {
-        Ok(terminal) => terminal,
-        Err(err) => {
-            let _ = disable_raw_mode();
-            let _ = execute!(io::stdout(), LeaveAlternateScreen);
-            return Err(err.into());
-        }
-    };
-
     let mut app = App::new(root, options)?;
-    loop {
-        terminal.draw(|frame| render(frame, &app))?;
-        if let CrosstermEvent::Key(key) = event::read()? {
-            app.handle_key(key.code)?;
-            if app.done {
-                break;
+    with_terminal(|terminal| {
+        loop {
+            terminal.draw(|frame| render(frame, &app))?;
+            if let CrosstermEvent::Key(key) = event::read()? {
+                app.handle_key_event(key)?;
+                if app.done {
+                    break;
+                }
             }
         }
-    }
-
-    let _ = disable_raw_mode();
-    let _ = execute!(terminal.backend_mut(), LeaveAlternateScreen);
-    let _ = terminal.show_cursor();
-    Ok(app.open_requested)
+        Ok(app.open_requested)
+    })
 }
 
 const WEEKDAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+
+/// Fixed cells are 6 wide and 3 tall: terminal glyphs are about twice
+/// as tall as wide, so 6x3 reads as a square.
+const FIXED_CELL_WIDTH: u16 = 6;
+const FIXED_CELL_HEIGHT: u16 = 3;
+/// Seven cells plus six 1-wide separators; six rows plus five 1-tall ones.
+const FIXED_GRID_WIDTH: u16 = 7 * FIXED_CELL_WIDTH + 6;
+const FIXED_GRID_HEIGHT: u16 = 6 * FIXED_CELL_HEIGHT + 5;
 
 /// Today hint for the header row: `None` on the `NONE` header, on today
 /// itself, or when `show_today` is off.
@@ -333,7 +317,13 @@ fn render_header(frame: &mut ratatui::Frame<'_>, app: &App, area: ratatui::layou
 
 fn render(frame: &mut ratatui::Frame<'_>, app: &App) {
     let area = frame.area();
-    if area.width < 56 || area.height < 22 {
+    let fixed = app.options.fixed_cells;
+    let (min_width, weeks_height) = if fixed {
+        (FIXED_GRID_WIDTH, FIXED_GRID_HEIGHT)
+    } else {
+        (56, 17)
+    };
+    if area.width < min_width || area.height < weeks_height + 5 {
         frame.render_widget(
             Paragraph::new("terminal too small for the calendar").alignment(Alignment::Center),
             area,
@@ -346,7 +336,7 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &App) {
             Constraint::Length(1),
             Constraint::Length(1),
             Constraint::Length(1),
-            Constraint::Length(17),
+            Constraint::Length(weeks_height),
             Constraint::Length(1),
         ])
         .split(area);
@@ -384,24 +374,30 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &App) {
             .alignment(Alignment::Center)
         })
         .collect();
-    render_row(frame, rows[2], &names);
+    if fixed {
+        render_row(frame, centered(rows[2], FIXED_GRID_WIDTH, 1), &names, true);
+    } else {
+        render_row(frame, rows[2], &names, false);
+    }
 
+    let weeks = if fixed {
+        centered(rows[3], FIXED_GRID_WIDTH, FIXED_GRID_HEIGHT)
+    } else {
+        rows[3]
+    };
+    let cell_height = if fixed { FIXED_CELL_HEIGHT } else { 2 };
+    let mut strips = Vec::with_capacity(11);
+    for strip in 0..11 {
+        strips.push(if strip % 2 == 0 {
+            Constraint::Length(cell_height)
+        } else {
+            Constraint::Length(1)
+        });
+    }
     let week_strips = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(2),
-            Constraint::Length(1),
-            Constraint::Length(2),
-            Constraint::Length(1),
-            Constraint::Length(2),
-            Constraint::Length(1),
-            Constraint::Length(2),
-            Constraint::Length(1),
-            Constraint::Length(2),
-            Constraint::Length(1),
-            Constraint::Length(2),
-        ])
-        .split(rows[3]);
+        .constraints(strips)
+        .split(weeks);
     // Separator columns from the first week row; identical for all rows.
     let mut sep_xs: Vec<u16> = Vec::new();
     let mut hseps: Vec<ratatui::layout::Rect> = Vec::new();
@@ -410,24 +406,7 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &App) {
             hseps.push(*strip_area);
             continue;
         }
-        let cols = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([
-                Constraint::Ratio(1, 7),
-                Constraint::Length(1),
-                Constraint::Ratio(1, 7),
-                Constraint::Length(1),
-                Constraint::Ratio(1, 7),
-                Constraint::Length(1),
-                Constraint::Ratio(1, 7),
-                Constraint::Length(1),
-                Constraint::Ratio(1, 7),
-                Constraint::Length(1),
-                Constraint::Ratio(1, 7),
-                Constraint::Length(1),
-                Constraint::Ratio(1, 7),
-            ])
-            .split(*strip_area);
+        let cols = week_columns(*strip_area, fixed);
         let week = strip / 2;
         for day in 0..7 {
             let index = week * 7 + day;
@@ -437,7 +416,7 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &App) {
             }
         }
     }
-    draw_grid(frame, rows[3], &sep_xs, &hseps);
+    draw_grid(frame, weeks, &sep_xs, &hseps);
 
     let footer = Paragraph::new(Line::from(Span::styled(
         "arrows/hjkl move · enter open · t today · q quit",
@@ -451,14 +430,39 @@ fn render_row(
     frame: &mut ratatui::Frame<'_>,
     area: ratatui::layout::Rect,
     cells: &[Paragraph<'_>],
+    fixed: bool,
 ) {
-    let cols = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Ratio(1, 7); 7])
-        .split(area);
-    for (cell, col) in cells.iter().zip(cols.iter()) {
+    let cols = if fixed {
+        week_columns(area, true)
+    } else {
+        Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Ratio(1, 7); 7])
+            .split(area)
+    };
+    // Fixed columns interleave 1-wide separators: cells sit on even slots.
+    let step = if fixed { 2 } else { 1 };
+    for (cell, col) in cells.iter().zip(cols.iter().step_by(step)) {
         frame.render_widget(cell, *col);
     }
+}
+
+/// Seven cells with 1-wide separators, no trailing separator.
+fn week_columns(area: ratatui::layout::Rect, fixed: bool) -> std::rc::Rc<[ratatui::layout::Rect]> {
+    let mut constraints = Vec::with_capacity(13);
+    for _ in 0..7 {
+        constraints.push(if fixed {
+            Constraint::Length(FIXED_CELL_WIDTH)
+        } else {
+            Constraint::Ratio(1, 7)
+        });
+        constraints.push(Constraint::Length(1));
+    }
+    constraints.pop();
+    Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints(constraints)
+        .split(area)
 }
 
 /// Explicit grid lines, drawn after the cells: full-height `│` separators
@@ -529,6 +533,7 @@ fn cell_widget<'a>(app: &App, index: usize, width: u16) -> Paragraph<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::Terminal;
     use std::path::PathBuf;
 
     fn date(year: i32, month: u32, day: u32) -> NaiveDate {
@@ -670,6 +675,7 @@ mod tests {
             day_color: Color::Green,
             repeat_color: Color::Blue,
             show_repeat: true,
+            fixed_cells: false,
             header: String::from("%A, %d.%m.%Y"),
             show_today: true,
         }
@@ -727,9 +733,15 @@ mod tests {
         app.handle_key(KeyCode::Char('q')).unwrap();
         assert!(app.done);
         assert_eq!(app.open_requested, None);
+
+        let mut app = App::new(&root, test_options()).unwrap();
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL))
+            .unwrap();
+        assert!(app.done);
+        assert_eq!(app.open_requested, None);
     }
 
-    fn screen_text(terminal: &Terminal<ratatui::backend::TestBackend>) -> String {
+    fn screen_text(terminal: &ratatui::Terminal<ratatui::backend::TestBackend>) -> String {
         terminal
             .backend()
             .buffer()
@@ -809,6 +821,48 @@ mod tests {
             .iter()
             .any(|cell| cell.symbol() == "D" && cell.fg == Color::Green);
         assert!(green_title, "day event title must use the day color");
+    }
+
+    #[test]
+    fn render_fixed_cells_form_a_centered_grid() {
+        use ratatui::backend::TestBackend;
+
+        let (_tmp, root) = seeded_root();
+        let mut options = test_options();
+        options.fixed_cells = true;
+        let mut app = App::new(&root, options).unwrap();
+        app.selected = date(2026, 10, 7);
+        app.year = 2026;
+        app.month = 10;
+        app.reload().unwrap();
+
+        let backend = TestBackend::new(80, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        // Six inner vertical separators over six 3-tall week rows,
+        // five horizontal ones: a 48x23 grid centered in 80 columns.
+        assert_eq!(
+            buffer
+                .content()
+                .iter()
+                .filter(|cell| cell.symbol() == "┼")
+                .count(),
+            30
+        );
+        assert_eq!(
+            buffer
+                .content()
+                .iter()
+                .filter(|cell| cell.symbol() == "│")
+                .count(),
+            108
+        );
+        // Weekday names sit on the 6-wide cells: ratatui centers
+        // `(6 / 2) - (3 / 2)`, so `Sun` starts at 16 + 2.
+        assert_eq!(buffer[(18, 2)].symbol(), "S");
+        // Wednesday Oct 7: third cell of the second week, number centered.
+        assert_eq!(buffer[(40, 8)].symbol(), "7");
     }
 
     #[test]

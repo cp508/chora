@@ -361,6 +361,7 @@ fn init_migrates_old_config_with_new_marker() {
     assert!(text.contains("[calendar]\n"));
     assert!(text.contains("day_color = \"green\""));
     assert!(text.contains("show_repeat = true"));
+    assert!(text.contains("fixed_cells = false"));
     assert!(text.contains("manage_old_event = \"nothing\""));
     assert!(text.contains("remote_url = \"\""));
 
@@ -1261,4 +1262,64 @@ fn event_show_date_merges_repeatables() {
     let items = parsed.as_array().unwrap();
     assert_eq!(items.len(), 2);
     assert!(items.iter().all(|item| item["date"] == "2026-11-23"));
+}
+
+#[test]
+fn relative_dir_syncs_in_background_without_nested_repo() {
+    let env = setup();
+    assert!(cmd(&env).arg("init").output().unwrap().status.success());
+
+    let editor = editor_script(&env, "noop.sh", "#!/bin/sh\nexit 0\n");
+    let root = env.home.join("rel-chora");
+    let out = cmd(&env)
+        .current_dir(&env.home)
+        .env("EDITOR", &editor)
+        .args(["--dir", "rel-chora", "event", "--date", "2026-11-20"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    poll_log(&root, "event:");
+    assert!(!root.join("rel-chora").exists());
+}
+
+#[test]
+fn opening_past_day_does_not_sweep_it_away() {
+    let env = setup();
+    assert!(cmd(&env).arg("init").output().unwrap().status.success());
+
+    let cfg = env.home.join(".config").join("chora").join("config.toml");
+    let text = "[main]\nchora_dir = \"~/chora\"\neditor = \"\"\nopen_dirs = \"\"\nmanage_old_event = \"delete\"\nremote_url = \"\"\n";
+    std::fs::write(&cfg, text).unwrap();
+
+    let editor = editor_script(&env, "noop.sh", "#!/bin/sh\nexit 0\n");
+    let root = storage(&env);
+    std::fs::create_dir_all(root.join("events")).unwrap();
+    std::fs::write(
+        root.join("events").join("2020-01-01.md"),
+        "# 2020-01-01\n\n## Kept\nTime: 10:00\nDuration: 1h\n",
+    )
+    .unwrap();
+
+    let out = cmd(&env)
+        .env("EDITOR", &editor)
+        .args([
+            "--dir",
+            &root.to_string_lossy(),
+            "event",
+            "--date",
+            "2020-01-01",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let content = std::fs::read_to_string(root.join("events").join("2020-01-01.md")).unwrap();
+    assert!(content.contains("## Kept"));
 }
