@@ -40,6 +40,12 @@ impl Store {
         self.root.join("notes")
     }
 
+    /// Human-owned context + `security`/`about` per notes path.
+    #[must_use]
+    pub fn index_path(&self) -> PathBuf {
+        self.root.join("index.md")
+    }
+
     /// Archive for passed day files under the `backlog` policy.
     #[must_use]
     pub fn backlog_dir(&self) -> PathBuf {

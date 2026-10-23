@@ -330,9 +330,15 @@ impl Config {
         })
     }
 
-    /// `--dir` wins over `chora_dir`.
+    /// `DEBUG_DIR` wins over `--dir`, which wins over `chora_dir`.
+    /// `DEBUG_DIR` is the agent/human sandbox for manual checks (see AGENTS.md).
     #[must_use]
     pub fn root(&self, dir_override: Option<&Path>) -> PathBuf {
+        if let Ok(raw) = std::env::var("DEBUG_DIR")
+            && !raw.trim().is_empty()
+        {
+            return PathBuf::from(raw);
+        }
         match dir_override {
             Some(dir) => dir.to_path_buf(),
             None => expand_tilde(&self.main.chora_dir),

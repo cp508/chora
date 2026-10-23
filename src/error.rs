@@ -35,9 +35,31 @@ pub enum ChoraError {
     #[error("bad date `{0}`: expected today|tomorrow|YYYY-MM-DD|DD.MM.YYYY")]
     BadDate(String),
 
-    #[error("bad duration `{0}`: expected 10s|45m|2h|1h30m")]
+    #[error("bad duration `{0}`: expected 30m|2h20m|2h 20m|2:00")]
     BadDuration(String),
 
-    #[error("pass either --date/--confirm or `show`, not both")]
+    #[error("bad time `{0}`: expected HH:MM")]
+    BadTime(String),
+
+    #[error("bad note path `{0}`")]
+    NoteBadPath(String),
+
+    #[error("no such notes dir `{0}`")]
+    NoteNoDir(String),
+
+    #[error("header not found: `{0}`")]
+    NoteNoHeader(String),
+
+    #[error("empty body: pipe markdown via stdin, e.g. printf '# T\\n' | chora note ...")]
+    NoteEmptyBody,
+
+    #[error(
+        "pass either creation flags (--date/--confirm/--title/--time/--duration/--body) or `show`, not both"
+    )]
     EventExclusiveAction,
+
+    #[error(
+        "event needs --title, --time and --duration (optional --date defaults to today, --body for context)"
+    )]
+    EventNeedsFields,
 }
