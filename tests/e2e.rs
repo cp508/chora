@@ -56,6 +56,35 @@ fn storage(env: &Env) -> PathBuf {
     env.home.join("chora")
 }
 
+/// Run the binary with `body` on stdin (heredoc-style note writes).
+fn cmd_stdin(env: &Env, args: &[&str], body: &str) -> std::process::Output {
+    use std::io::Write;
+    use std::process::Stdio;
+    let mut child = cmd(env);
+    git_env(&mut child, env);
+    child
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = child.spawn().unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(body.as_bytes())
+        .unwrap();
+    child.wait_with_output().unwrap()
+}
+
+/// Human-owned `index.md`, written by hand (agents never write it).
+fn write_index(root: &Path, text: &str) {
+    std::fs::create_dir_all(root).unwrap();
+    std::fs::write(root.join("index.md"), text).unwrap();
+}
+
+const TEST_INDEX: &str = "# Context\n\nTest notes.\n\n## Notes\n\n### docs\nsecurity: open\nabout: Public docs\n\n### work\nsecurity: restricted\nabout: Work notes\n\n#### secret.md\nsecurity: critical\nabout: Secrets\n";
+
 #[test]
 fn init_creates_only_config() {
     let env = setup();
@@ -1322,4 +1351,547 @@ fn opening_past_day_does_not_sweep_it_away() {
     );
     let content = std::fs::read_to_string(root.join("events").join("2020-01-01.md")).unwrap();
     assert!(content.contains("## Kept"));
+}
+
+#[test]
+fn event_direct_flags_create_without_editor() {
+    let env = setup();
+    assert!(cmd(&env).arg("init").output().unwrap().status.success());
+
+    let root = storage(&env);
+    let out = cmd(&env)
+        .args([
+            "--dir",
+            &root.to_string_lossy(),
+            "event",
+            "--date",
+            "2026-11-20",
+            "--title",
+            "Standup",
+            "--time",
+            "10:00",
+            "--duration",
+            "2h 20m",
+            "--body",
+            "Agenda.",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(String::from_utf8_lossy(&out.stdout).contains("created: 2026-11-20 10:00 Standup"));
+
+    let day = std::fs::read_to_string(root.join("events").join("2026-11-20.md")).unwrap();
+    assert!(day.contains("## Standup"));
+    assert!(day.contains("Time: 10:00"));
+    assert!(day.contains("Duration: 2h20m"));
+    assert!(day.contains("Agenda."));
+
+    let out = cmd(&env)
+        .args([
+            "--dir",
+            &root.to_string_lossy(),
+            "event",
+            "show",
+            "--date",
+            "2026-11-20",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    let parsed: serde_json::Value =
+        serde_json::from_str(&String::from_utf8_lossy(&out.stdout)).unwrap();
+    assert_eq!(parsed[0]["title"], "Standup");
+    assert_eq!(parsed[0]["duration"], "2h20m");
+    poll_log(&root, "event: 2026-11-20 Standup");
+}
+
+#[test]
+fn event_direct_flags_need_all_fields_and_reject_show_mix() {
+    let env = setup();
+    assert!(cmd(&env).arg("init").output().unwrap().status.success());
+
+    let root = storage(&env);
+    // Missing --duration.
+    let out = cmd(&env)
+        .args([
+            "--dir",
+            &root.to_string_lossy(),
+            "event",
+            "--date",
+            "2026-11-20",
+            "--title",
+            "Standup",
+            "--time",
+            "10:00",
+        ])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("--title, --time and --duration"));
+
+    // Direct flags mixed with `show`.
+    let out = cmd(&env)
+        .args([
+            "--dir",
+            &root.to_string_lossy(),
+            "event",
+            "--title",
+            "Standup",
+            "show",
+        ])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+}
+
+#[test]
+fn help_and_skill_print_machine_usage() {
+    let env = setup();
+    for name in ["help", "skill"] {
+        let out = cmd(&env).args([name]).output().unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let text = String::from_utf8_lossy(&out.stdout).into_owned();
+        assert!(text.contains("chora event --date"));
+        assert!(text.contains("--title"));
+        assert!(text.contains("--json"));
+    }
+}
+
+#[test]
+fn note_override_add_under_headers_roundtrip() {
+    let env = setup();
+    assert!(cmd(&env).arg("init").output().unwrap().status.success());
+    let root = storage(&env);
+    write_index(&root, TEST_INDEX);
+
+    // Rewrite (creates dirs + file).
+    let out = cmd_stdin(
+        &env,
+        &[
+            "--dir",
+            &root.to_string_lossy(),
+            "note",
+            "override",
+            "docs",
+            "--path",
+            "main.md",
+        ],
+        "# Guide\n\n## Tasks\n\n## Done\n",
+    );
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = std::fs::read_to_string(root.join("notes").join("docs").join("main.md")).unwrap();
+    assert!(text.contains("# Guide"));
+
+    // Append at the end by default.
+    let out = cmd_stdin(
+        &env,
+        &[
+            "--dir",
+            &root.to_string_lossy(),
+            "note",
+            "add",
+            "docs",
+            "--path",
+            "main.md",
+        ],
+        "tail note\n",
+    );
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = std::fs::read_to_string(root.join("notes").join("docs").join("main.md")).unwrap();
+    assert!(text.trim_end().ends_with("tail note"));
+
+    // Insert under a header.
+    let out = cmd_stdin(
+        &env,
+        &[
+            "--dir",
+            &root.to_string_lossy(),
+            "note",
+            "add",
+            "docs",
+            "--path",
+            "main.md",
+            "--under",
+            "Tasks",
+        ],
+        "task one\n",
+    );
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = std::fs::read_to_string(root.join("notes").join("docs").join("main.md")).unwrap();
+    assert!(text.contains("## Tasks\n\ntask one"));
+
+    // Headers tree.
+    let out = cmd(&env)
+        .args(["--dir", &root.to_string_lossy(), "note", "headers", "docs"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(text.contains("docs/main.md:"));
+    assert!(text.contains("Tasks"));
+
+    // Show with bodies.
+    let out = cmd(&env)
+        .args([
+            "--dir",
+            &root.to_string_lossy(),
+            "note",
+            "show",
+            "docs",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let parsed: serde_json::Value =
+        serde_json::from_str(&String::from_utf8_lossy(&out.stdout)).unwrap();
+    assert_eq!(parsed["dir"], "docs");
+    assert_eq!(parsed["files"].as_array().unwrap().len(), 1);
+    assert!(
+        parsed["files"][0]["body"]
+            .as_str()
+            .unwrap()
+            .contains("task one")
+    );
+    poll_log(&root, "note ");
+}
+
+#[test]
+fn note_show_respects_max_access() {
+    let env = setup();
+    assert!(cmd(&env).arg("init").output().unwrap().status.success());
+    let root = storage(&env);
+    write_index(&root, TEST_INDEX);
+    std::fs::create_dir_all(root.join("notes").join("docs")).unwrap();
+    std::fs::write(root.join("notes").join("docs").join("main.md"), "# G\n").unwrap();
+    std::fs::create_dir_all(root.join("notes").join("work")).unwrap();
+    std::fs::write(root.join("notes").join("work").join("secret.md"), "# S\n").unwrap();
+    std::fs::write(root.join("notes").join("work").join("open.md"), "# O\n").unwrap();
+
+    // Default (restricted): critical hidden.
+    let out = cmd(&env)
+        .args([
+            "--dir",
+            &root.to_string_lossy(),
+            "note",
+            "show",
+            "work",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let parsed: serde_json::Value =
+        serde_json::from_str(&String::from_utf8_lossy(&out.stdout)).unwrap();
+    let paths: Vec<&str> = parsed["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["path"].as_str().unwrap())
+        .collect();
+    assert!(paths.contains(&"work/open.md"));
+    assert!(!paths.contains(&"work/secret.md"));
+
+    // --max-access open: restricted entries hidden, critical gone.
+    let out = cmd(&env)
+        .args([
+            "--dir",
+            &root.to_string_lossy(),
+            "--max-access",
+            "open",
+            "note",
+            "show",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let parsed: serde_json::Value =
+        serde_json::from_str(&String::from_utf8_lossy(&out.stdout)).unwrap();
+    let text = serde_json::to_string(&parsed).unwrap();
+    assert!(text.contains("docs"));
+    assert!(!text.contains("work"));
+    assert!(!text.contains("secret"));
+
+    // --max-access critical: everything visible.
+    let out = cmd(&env)
+        .args([
+            "--dir",
+            &root.to_string_lossy(),
+            "--max-access",
+            "critical",
+            "note",
+            "show",
+            "work",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let parsed: serde_json::Value =
+        serde_json::from_str(&String::from_utf8_lossy(&out.stdout)).unwrap();
+    assert_eq!(parsed["files"].as_array().unwrap().len(), 2);
+}
+
+#[test]
+fn note_show_derives_about_from_h1_unless_index_sets_it() {
+    let env = setup();
+    assert!(cmd(&env).arg("init").output().unwrap().status.success());
+    let root = storage(&env);
+    write_index(&root, "# Context\n\n## Notes\n\n### docs\nsecurity: open\n");
+    std::fs::create_dir_all(root.join("notes").join("docs")).unwrap();
+    std::fs::write(
+        root.join("notes").join("docs").join("main.md"),
+        "# My Title\n",
+    )
+    .unwrap();
+
+    // No `about` in index.md: the file's h1 shows up.
+    let out = cmd(&env)
+        .args(["--dir", &root.to_string_lossy(), "note", "show", "--json"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let parsed: serde_json::Value =
+        serde_json::from_str(&String::from_utf8_lossy(&out.stdout)).unwrap();
+    assert_eq!(parsed["dirs"][0]["files"][0]["about"], "My Title");
+
+    let out = cmd(&env)
+        .args(["--dir", &root.to_string_lossy(), "note", "show", "docs"])
+        .output()
+        .unwrap();
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("about: My Title"),
+        "plain show must print the derived about"
+    );
+
+    // A dir-level `about` never flows down: the file keeps its h1.
+    write_index(
+        &root,
+        "# Context\n\n## Notes\n\n### docs\nsecurity: open\nabout: Dir About\n",
+    );
+    let out = cmd(&env)
+        .args(["--dir", &root.to_string_lossy(), "note", "show", "--json"])
+        .output()
+        .unwrap();
+    let parsed: serde_json::Value =
+        serde_json::from_str(&String::from_utf8_lossy(&out.stdout)).unwrap();
+    assert_eq!(parsed["dirs"][0]["about"], "Dir About");
+    assert_eq!(parsed["dirs"][0]["files"][0]["about"], "My Title");
+
+    // Explicit `about` on the file entry wins over the h1
+    // (a dir-level `about` never flows down into files).
+    write_index(
+        &root,
+        "# Context\n\n## Notes\n\n### docs\nsecurity: open\nabout: Dir About\n\n#### main.md\nabout: Index About\n",
+    );
+    let out = cmd(&env)
+        .args(["--dir", &root.to_string_lossy(), "note", "show", "--json"])
+        .output()
+        .unwrap();
+    let parsed: serde_json::Value =
+        serde_json::from_str(&String::from_utf8_lossy(&out.stdout)).unwrap();
+    assert_eq!(parsed["dirs"][0]["files"][0]["about"], "Index About");
+    assert_eq!(parsed["dirs"][0]["about"], "Dir About");
+}
+
+#[test]
+fn note_show_unknown_dir_errors_and_lists_all() {
+    let env = setup();
+    assert!(cmd(&env).arg("init").output().unwrap().status.success());
+    let root = storage(&env);
+    write_index(&root, TEST_INDEX);
+    std::fs::create_dir_all(root.join("notes").join("docs")).unwrap();
+    std::fs::write(root.join("notes").join("docs").join("main.md"), "# G\n").unwrap();
+
+    let out = cmd(&env)
+        .args(["--dir", &root.to_string_lossy(), "note", "show", "nope"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("nope"));
+    // The all-dirs listing still guides the caller.
+    assert!(String::from_utf8_lossy(&out.stdout).contains("docs"));
+}
+
+#[test]
+fn note_rejects_escapes_and_empty_stdin() {
+    let env = setup();
+    assert!(cmd(&env).arg("init").output().unwrap().status.success());
+    let root = storage(&env);
+
+    let out = cmd_stdin(
+        &env,
+        &[
+            "--dir",
+            &root.to_string_lossy(),
+            "note",
+            "override",
+            "docs",
+            "--path",
+            "../evil.md",
+        ],
+        "# x\n",
+    );
+    assert!(!out.status.success());
+
+    let out = cmd_stdin(
+        &env,
+        &[
+            "--dir",
+            &root.to_string_lossy(),
+            "note",
+            "override",
+            "docs",
+            "--path",
+            "main.md",
+        ],
+        "   \n",
+    );
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("Empty body")
+            || String::from_utf8_lossy(&out.stderr).contains("empty body")
+    );
+}
+
+#[test]
+fn index_shows_tree_and_filters() {
+    let env = setup();
+    assert!(cmd(&env).arg("init").output().unwrap().status.success());
+    let root = storage(&env);
+    write_index(&root, TEST_INDEX);
+
+    let out = cmd(&env)
+        .args(["--dir", &root.to_string_lossy(), "index"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(text.contains("Test notes."));
+    assert!(text.contains("docs"));
+    // Default restricted hides the critical entry.
+    assert!(!text.contains("secret"));
+
+    let out = cmd(&env)
+        .args(["--dir", &root.to_string_lossy(), "index", "--json"])
+        .output()
+        .unwrap();
+    let parsed: serde_json::Value =
+        serde_json::from_str(&String::from_utf8_lossy(&out.stdout)).unwrap();
+    assert_eq!(parsed["context"], "Test notes.");
+    assert!(parsed["entries"].as_array().unwrap().len() >= 2);
+}
+
+#[test]
+fn open_index_creates_skeleton() {
+    let env = setup();
+    assert!(cmd(&env).arg("init").output().unwrap().status.success());
+    let root = storage(&env);
+    std::fs::create_dir_all(root.join("notes").join("docs")).unwrap();
+
+    let out = cmd(&env)
+        .env("EDITOR", "true")
+        .args(["--dir", &root.to_string_lossy(), "open", "index"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = std::fs::read_to_string(root.join("index.md")).unwrap();
+    assert!(text.contains("### docs"));
+}
+
+#[test]
+fn debug_dir_overrides_storage_root() {
+    let env = setup();
+    assert!(cmd(&env).arg("init").output().unwrap().status.success());
+    let root = storage(&env);
+    let sandbox = env.home.join("sandbox");
+    std::fs::create_dir_all(&sandbox).unwrap();
+
+    let out = cmd_stdin(
+        &env,
+        &[
+            "--dir",
+            &root.to_string_lossy(),
+            "note",
+            "override",
+            "docs",
+            "--path",
+            "main.md",
+        ],
+        "# debug\n",
+    );
+    // Sanity: without DEBUG_DIR the write lands in --dir.
+    assert!(out.status.success());
+    assert!(root.join("notes").join("docs").join("main.md").exists());
+
+    let mut child = cmd(&env);
+    git_env(&mut child, &env);
+    let out = child
+        .env("DEBUG_DIR", &sandbox)
+        .args(["note", "show", "--json"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // Sandbox is empty: DEBUG_DIR won over the config, not --dir (none here).
+    let parsed: serde_json::Value =
+        serde_json::from_str(&String::from_utf8_lossy(&out.stdout)).unwrap();
+    assert_eq!(parsed["dirs"].as_array().unwrap().len(), 0);
+    assert!(!sandbox.join("notes").exists());
 }

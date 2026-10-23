@@ -29,18 +29,72 @@ A plain git repository, safe to poke by hand:
 
 ## Commands
 
-Bare `chora` prints the whole tree.
+Bare `chora` prints the whole tree (through `less -R` on a terminal, colors kept).
 
 - `init` — bootstrap the config. No flags, never touches the storage.
-- `open <note|event>` — open a directory in the dirs-opener. On exit, in the background: pull (rebase), commit, push. The shell is back instantly, the log is `sync.log` (see below).
+- `open <note|event|index>` — open a directory (or `index.md`) in the opener. On exit, in the background: pull (rebase), commit, push. The shell is back instantly, the log is `sync.log` (see below). `open index` edits the human-owned `index.md`.
+- `note add <DIR> --path <FILE> [--under <HEADER>]` — append stdin markdown to a note file (creates it when missing). With `--under`, inserts below the first matching header.
+- `note override <DIR> --path <FILE>` — rewrite a note file with stdin markdown (creates it when missing).
+- `note show [<DIR>] [--json]` — all dirs with `security`/`about` (no bodies), or one dir recursive with bodies (`path` + markdown). Unknown `<DIR>` errors and prints the all-dirs listing. `--json` prints an object for scripts.
+- `note headers <DIR> [--path <FILE>]...` — `#`-header tree with file names and line numbers, recursive.
+- `index [--json]` — show `index.md` context + `security`/`about` tree. Warnings go to stderr.
+- `event --date <DATE> --title <TITLE> --time <TIME> --duration <DUR> [--body <TEXT>] [--confirm]` — create an event at once, no editor. `--date` defaults to today. Sync runs in the background.
+- `event --date <DATE> --title <TITLE> --time <TIME> --duration <DUR> [--body <TEXT>] [--confirm]` — create an event at once, no editor. `--date` defaults to today. Sync runs in the background.
 - `event --date <DATE>` — append an event stub to the day file and open it in the file opener. Sync runs in the background after closing.
 - `event [--confirm]` — TUI form for creating an event. With `--confirm`, opens the day file after submit.
 - `event show [--date <DATE>] [--json]` — show events: one day plus its repeatables with `--date`, all days in a row without. `--json` prints an array for scripts.
 - `calendar` — read-only month grid with event markers. Arrows/hjkl move, Enter opens the day, `t` jumps to today, `q` quits. Day-file events use `[calendar] day_color`, weekday repeatables use `repeat_color` (unless `show_repeat = false`).
 - `settings` — interactive TUI editor for all settings in `~/.config/chora/config.toml`.
+- `help` (`skill`) — short machine-readable usage for AI agents.
 - `completion <bash|fish>` — print shell completions to stdout.
 
 `<DATE>` is `today`, `tomorrow`, `YYYY-MM-DD`, or `DD.MM.YYYY` (e.g. `20.05.2026`).
+`<TIME>` is `HH:MM` (e.g. `09:30`, `9:00`) or `H` (e.g. `9` = `09:00`).
+`<DUR>` is `30m`, `2h20m`, `2h 20m`, `2:00` (= 2h), `1:30` (= 1h30m), `10s`.
+
+Pipe note bodies via stdin, e.g. `printf '# T\n' | chora note override biletmir --path main.md`.
+`--path` is relative inside `notes/<DIR>` (`main.md`, `worker-task/high.md`), always `.md`.
+Empty stdin is an error. Writes sync in the background like events.
+
+## Notes and index
+
+`notes/<DIR>/...md` hold agent-readable markdown, nested dirs allowed.
+Loose `notes/*.md` files are shown under the `(files)` group.
+
+`<storage>/index.md` is HUMAN-owned: agents must never write it
+(only `chora open index`, by a human). Format:
+
+```md
+# Context
+
+English description of all notes.
+
+## Notes
+
+### biletmir
+security: restricted
+about: ticket marketplace notes
+
+#### worker-task/high.md
+security: critical
+about: production passwords
+```
+
+- `###` names a top-level dir; deeper `#` = deeper path
+  (`#### guides` + `##### install.md` under `### docs` = `docs/guides/install.md`).
+- Missing entry = `open` + empty `about`. Bad `security` = `open` + warning.
+  `security` inherits (longest-prefix match, `open < restricted < critical`),
+  but `about` never flows down: an h3 `about` stays on its own dir.
+  Empty `about` falls back to the file's own h1 (`# Guide` → `Guide`);
+  an explicit `about` in `index.md` always wins.
+- `--max-access <open|restricted|critical>` (global flag, default `restricted`)
+  filters `note show`, `note headers` and `chora index`:
+  `open` sees only `open`, `restricted` sees `open`+`restricted`, `critical` sees all.
+  Writes are not gated. Events have no levels.
+- nvim completion for `security:` levels (`open`, `restricted`, `critical`)
+  via blink-cmp: `editors/nvim/chora-index.lua` is a blink source module —
+  register it as a provider (shows in the Tab menu on `security:` lines
+  inside `index.md`, nowhere else).
 
 ### Event format
 
@@ -58,7 +112,7 @@ Arbitrary context.
 ```
 
 - `Time:` — `HH:MM`.
-- `Duration:` — `10s`, `45m`, `2h`, `1h30m`.
+- `Duration:` — `30m`, `2h20m`, `2h 20m`, `2:00`, `1h30m`, `10s`.
 - Sections without valid `Time:`/`Duration:` are plain day text, skipped silently.
 - Day output is sorted by time; repeatables are mixed in with no markers.
 
@@ -106,3 +160,12 @@ just qa      # fmt + clippy + tests
 just debug   # debug build
 just release # release build
 ```
+
+Manual check of every new feature in a sandbox (never touch real `~/chora`):
+
+```sh
+mkdir -p /tmp/chora-debug
+DEBUG_DIR=/tmp/chora-debug chora <args for the feature>
+```
+
+`DEBUG_DIR` wins over `--dir`, which wins over `chora_dir` from the config.

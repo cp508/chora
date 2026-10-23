@@ -18,15 +18,48 @@ pub struct Event {
     pub context: String,
 }
 
-/// `10s`, `45m`, `2h`, `1h30m`. Groups run back to back, at least one.
+/// `30m`, `2h`, `1h30m`, `2h 20m` (spaces ignored), `2:00` (=2h),
+/// `1:30` (=1h30m), `1:02:03` (=1h2m3s). Groups run back to back, at least one.
 pub fn parse_duration(raw: &str) -> Result<Duration, ChoraError> {
     let bad = || ChoraError::BadDuration(raw.to_owned());
     let text = raw.trim();
+    if text.is_empty() {
+        return Err(bad());
+    }
+    if text.contains(':') {
+        let parts: Vec<&str> = text.split(':').map(str::trim).collect();
+        if parts.len() != 2 && parts.len() != 3 {
+            return Err(bad());
+        }
+        if parts
+            .iter()
+            .any(|p| p.is_empty() || !p.chars().all(|c| c.is_ascii_digit()))
+        {
+            return Err(bad());
+        }
+        let h: u64 = parts[0].parse().map_err(|_| bad())?;
+        let m: u64 = parts[1].parse().map_err(|_| bad())?;
+        let s: u64 = if parts.len() == 3 {
+            parts[2].parse().map_err(|_| bad())?
+        } else {
+            0
+        };
+        if m >= 60 || s >= 60 {
+            return Err(bad());
+        }
+        let total = h
+            .checked_mul(3600)
+            .and_then(|v| v.checked_add(m.checked_mul(60)?))
+            .and_then(|v| v.checked_add(s))
+            .ok_or_else(bad)?;
+        return Ok(Duration::from_secs(total));
+    }
+    let compact: String = text.chars().filter(|c| !c.is_whitespace()).collect();
     let mut total_secs: u64 = 0;
     let mut groups = 0;
     let mut num: u64 = 0;
     let mut have_num = false;
-    for ch in text.chars() {
+    for ch in compact.chars() {
         if ch.is_ascii_digit() {
             let digit = u64::from(ch as u8 - b'0');
             num = num
@@ -55,6 +88,23 @@ pub fn parse_duration(raw: &str) -> Result<Duration, ChoraError> {
         return Err(bad());
     }
     Ok(Duration::from_secs(total_secs))
+}
+
+/// `HH:MM` (`9:00`, `09:30`) or `H` (`9` = 09:00). Strict, no shorthands.
+pub fn parse_time_arg(raw: &str) -> Result<NaiveTime, ChoraError> {
+    let bad = || ChoraError::BadTime(raw.to_owned());
+    let text = raw.trim();
+    if let Ok(t) = NaiveTime::parse_from_str(text, "%H:%M") {
+        return Ok(t);
+    }
+    if !text.is_empty()
+        && text.chars().all(|c| c.is_ascii_digit())
+        && let Ok(h) = text.parse::<u32>()
+        && let Some(t) = NaiveTime::from_hms_opt(h, 0, 0)
+    {
+        return Ok(t);
+    }
+    Err(bad())
 }
 
 #[must_use]
@@ -180,6 +230,12 @@ mod tests {
             ("1h30m", 5400),
             ("1h30m10s", 5410),
             ("0s", 0),
+            ("2h 20m", 8400),
+            ("1h 30m 10s", 5410),
+            ("2:00", 7200),
+            ("1:30", 5400),
+            ("0:45", 2700),
+            ("1:02:03", 3723),
         ];
         for (raw, secs) in cases {
             assert_eq!(
@@ -203,8 +259,30 @@ mod tests {
             "1.5h",
             "-5m",
             "99999999999999999999h",
+            "1:60",
+            "1:2:3:4",
+            "1:",
+            ":30",
+            "1h:30",
         ] {
             assert!(parse_duration(raw).is_err(), "{raw}");
+        }
+    }
+
+    #[test]
+    fn parse_time_arg_table() {
+        let at = |h, m| NaiveTime::from_hms_opt(h, m, 0).unwrap();
+        for (raw, expected) in [
+            ("09:30", at(9, 30)),
+            ("9:00", at(9, 0)),
+            (" 18:30 ", at(18, 30)),
+            ("9", at(9, 0)),
+            ("23", at(23, 0)),
+        ] {
+            assert_eq!(parse_time_arg(raw).unwrap(), expected, "{raw}");
+        }
+        for raw in ["", "25:00", "12:60", "abc", "9:00:00", "930", "-1"] {
+            assert!(parse_time_arg(raw).is_err(), "{raw}");
         }
     }
 

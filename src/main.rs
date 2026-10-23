@@ -4,12 +4,14 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 use chora::cli::{
-    Cli, Cmd, CompletionShell, EventAction, OpenTarget, parse_date_arg, render_help_tree, today,
+    Cli, Cmd, CompletionShell, EventAction, NoteAction, OpenTarget, parse_date_arg,
+    render_help_tree, render_skill_help, today,
 };
 use chora::config::{Config, OldEventPolicy};
 use chora::error::ChoraError;
+use chora::index::{AccessLevel, Index};
 use chora::store::Store;
-use chora::{calendar, editor, event, git, output, sync, tui};
+use chora::{calendar, editor, event, git, note, output, sync, tui};
 use clap::Parser;
 
 fn main() -> anyhow::Result<()> {
@@ -34,25 +36,42 @@ fn main() -> anyhow::Result<()> {
     chora::log::init(cli.debug);
     chora::debug_log!("debug logging on");
     let Some(cmd) = cli.cmd else {
-        print!("{}", render_help_tree());
+        page_or_print(&render_help_tree());
         return Ok(());
     };
     match cmd {
         Cmd::Init => cmd_init(),
         Cmd::Settings => cmd_settings(),
+        Cmd::Help => {
+            page_or_print(&render_skill_help());
+            Ok(())
+        }
         Cmd::Completion { shell } => cmd_completion(shell),
         Cmd::Open { target } => {
             let (cfg, store) = load_store(cli.dir.as_deref(), true)?;
             require_repo(&store)?;
-            let (dir, name) = match target {
-                OpenTarget::Note => (store.notes_dir(), "note"),
-                OpenTarget::Event => (store.events_dir(), "event"),
-            };
             // cwd = target: `sh -c '... $(fzf)'` openers scan cwd and ignore
             // the target arg (it lands in $0), so root would show both dirs.
             // No network up here: the opener must start instantly, and nothing
             // may delay the detach below. The pull lives in the detached
             // `sync-after-open` child.
+            if matches!(target, OpenTarget::Index) {
+                let path = store.index_path();
+                if !path.exists() {
+                    let dirs = note::top_dirs(&store.notes_dir())?;
+                    std::fs::write(&path, Index::skeleton(&dirs))
+                        .with_context(|| format!("failed to write {}", path.display()))?;
+                }
+                sync::with_auto_commit(store.root(), cfg.main.auto_commit, "index", || {
+                    editor::open(&path, store.root(), &cfg.main.editor)
+                })?;
+                return sync_in_background(&store, "open: index");
+            }
+            let (dir, name) = match target {
+                OpenTarget::Note => (store.notes_dir(), "note"),
+                OpenTarget::Event => (store.events_dir(), "event"),
+                OpenTarget::Index => unreachable!("handled above"),
+            };
             if matches!(target, OpenTarget::Event) {
                 sweep_old_events(&store, &cfg)?;
             }
@@ -65,18 +84,71 @@ fn main() -> anyhow::Result<()> {
             let (cfg, store) = load_store(cli.dir.as_deref(), false)?;
             cmd_calendar(&store, &cfg, cli.dir.as_deref())
         }
+        Cmd::Note { action } => {
+            let max = cli.max_access;
+            match action {
+                NoteAction::Add {
+                    dirname,
+                    path,
+                    under,
+                } => {
+                    let (_cfg, store) = load_store(cli.dir.as_deref(), true)?;
+                    require_repo(&store)?;
+                    cmd_note_add(&store, &dirname, &path, under.as_deref())
+                }
+                NoteAction::Override { dirname, path } => {
+                    let (_cfg, store) = load_store(cli.dir.as_deref(), true)?;
+                    require_repo(&store)?;
+                    cmd_note_override(&store, &dirname, &path)
+                }
+                NoteAction::Show { dirname, json } => {
+                    let (_cfg, store) = load_store(cli.dir.as_deref(), false)?;
+                    cmd_note_show(&store, dirname.as_deref(), json, max)
+                }
+                NoteAction::Headers { dirname, path } => {
+                    let (_cfg, store) = load_store(cli.dir.as_deref(), false)?;
+                    cmd_note_headers(&store, &dirname, &path, max)
+                }
+            }
+        }
+        Cmd::Index { json } => {
+            let (_cfg, store) = load_store(cli.dir.as_deref(), false)?;
+            cmd_index(&store, json, cli.max_access)
+        }
         Cmd::Event {
             date,
             confirm,
+            title,
+            time,
+            duration,
+            body,
             action,
         } => {
-            let creating = date.is_some() || confirm;
+            let direct = title.is_some() || time.is_some() || duration.is_some() || body.is_some();
+            let creating = date.is_some() || confirm || direct;
             match action {
                 Some(_) if creating => Err(ChoraError::EventExclusiveAction.into()),
                 // Read-only: showing never creates storage or needs a repo.
                 Some(EventAction::Show { date, json }) => {
                     let (_cfg, store) = load_store(cli.dir.as_deref(), false)?;
                     cmd_event_show(&store, date.as_deref(), json)
+                }
+                None if direct => {
+                    let (cfg, store) = load_store(cli.dir.as_deref(), true)?;
+                    require_repo(&store)?;
+                    let (Some(title), Some(time), Some(duration)) = (title, time, duration) else {
+                        return Err(ChoraError::EventNeedsFields.into());
+                    };
+                    cmd_event_add(
+                        &store,
+                        &cfg,
+                        date.as_deref(),
+                        &title,
+                        &time,
+                        &duration,
+                        body.as_deref().unwrap_or_default(),
+                        confirm,
+                    )
                 }
                 None => {
                     let (cfg, store) = load_store(cli.dir.as_deref(), true)?;
@@ -91,6 +163,30 @@ fn main() -> anyhow::Result<()> {
             }
         }
     }
+}
+
+/// Print `text` through `less -R` on a terminal (colors preserved),
+/// plain print otherwise (pipes, scripts). Falls back to print when
+/// `less` is missing. Write errors are ignored: quitting the pager
+/// early closes the pipe, which is not a failure.
+fn page_or_print(text: &str) {
+    use std::io::{IsTerminal, Write};
+    if !std::io::stdout().is_terminal() {
+        print!("{text}");
+        return;
+    }
+    let Ok(mut child) = std::process::Command::new("less")
+        .arg("-R")
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+    else {
+        print!("{text}");
+        return;
+    };
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(text.as_bytes());
+    }
+    let _ = child.wait();
 }
 
 /// The detached background child: commit the exit state, rebase onto fresh
@@ -327,6 +423,56 @@ fn cmd_event_stub(store: &Store, cfg: &Config, raw: &str) -> anyhow::Result<()> 
     open_day_file(store, cfg, day)
 }
 
+/// Non-interactive creation: no editor, no TUI. `--date` defaults to today;
+/// past dates are allowed (unlike the TUI). Syncs in the background.
+#[allow(clippy::too_many_arguments)]
+fn cmd_event_add(
+    store: &Store,
+    cfg: &Config,
+    date_raw: Option<&str>,
+    title_raw: &str,
+    time_raw: &str,
+    duration_raw: &str,
+    body_raw: &str,
+    confirm: bool,
+) -> anyhow::Result<()> {
+    let day = match date_raw {
+        Some(raw) => parse_date_arg(raw)?,
+        None => today(),
+    };
+    let title = title_raw.trim();
+    if title.is_empty() {
+        anyhow::bail!("title is empty");
+    }
+    let time = event::parse_time_arg(time_raw)?;
+    let duration = event::parse_duration(duration_raw)?;
+    let rendered = event::render_section(&event::Event {
+        title: title.to_owned(),
+        date: day,
+        time,
+        duration,
+        context: body_raw.trim().to_owned(),
+    });
+    if day >= today() {
+        sweep_old_events(store, cfg)?;
+    }
+    store.append_section(day, &rendered)?;
+    if confirm {
+        let path = store.ensure_day_file(day)?;
+        sync::with_auto_commit(store.root(), cfg.main.auto_commit, "event", || {
+            editor::open(&path, store.root(), &cfg.main.editor)
+        })?;
+    }
+    let message = format!("event: {} {title}", day.format("%Y-%m-%d"));
+    sync_in_background(store, &message)?;
+    println!(
+        "created: {} {} {title}",
+        day.format("%Y-%m-%d"),
+        time.format("%H:%M")
+    );
+    Ok(())
+}
+
 /// Append a stub to the day file and open it in the file opener.
 /// Shared by `event --date` and calendar `Enter`.
 fn open_day_file(store: &Store, cfg: &Config, day: chrono::NaiveDate) -> anyhow::Result<()> {
@@ -372,4 +518,260 @@ fn cmd_event_tui(store: &Store, cfg: &Config, confirm: bool) -> anyhow::Result<(
         })?;
     }
     sync_in_background(store, &message)
+}
+
+/// Read the whole stdin as a note body. Empty input is an error:
+/// silently truncating a file would be data loss.
+fn read_stdin_body() -> anyhow::Result<String> {
+    use std::io::Read;
+    let mut body = String::new();
+    std::io::stdin()
+        .read_to_string(&mut body)
+        .context("failed to read stdin")?;
+    if body.trim().is_empty() {
+        return Err(ChoraError::NoteEmptyBody.into());
+    }
+    Ok(body)
+}
+
+/// Resolve `notes/<dirname>/<rel>` safely and check the `.md` suffix.
+fn note_file(store: &Store, dirname: &str, rel: &str) -> anyhow::Result<(String, PathBuf)> {
+    note::require_md(rel)?;
+    let full = format!("{dirname}/{rel}");
+    let path = note::join_safe(&store.notes_dir(), &full)?;
+    Ok((full, path))
+}
+
+/// Append stdin markdown to a note file (creates it when missing).
+/// `--under` inserts below the first matching header instead of the end.
+fn cmd_note_add(
+    store: &Store,
+    dirname: &str,
+    rel: &str,
+    under: Option<&str>,
+) -> anyhow::Result<()> {
+    let (full, path) = note_file(store, dirname, rel)?;
+    let body = read_stdin_body()?;
+    let body = format!("{}\n", body.trim_matches('\n'));
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    if path.exists() {
+        let mut text = std::fs::read_to_string(&path)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        if let Some(header) = under {
+            text = note::insert_under(&text, header, body.trim_matches('\n'))?;
+        } else {
+            if !text.ends_with('\n') {
+                text.push('\n');
+            }
+            text.push('\n');
+            text.push_str(body.trim_matches('\n'));
+            text.push('\n');
+        }
+        std::fs::write(&path, text)
+            .with_context(|| format!("failed to write {}", path.display()))?;
+    } else {
+        if under.is_some() {
+            anyhow::bail!("no such file `{full}`: `--under` needs an existing file");
+        }
+        std::fs::write(&path, &body)
+            .with_context(|| format!("failed to write {}", path.display()))?;
+    }
+    let message = format!("note add: {full}");
+    sync_in_background(store, &message)?;
+    println!("appended: {full}");
+    Ok(())
+}
+
+/// Overwrite a note file with stdin markdown (creates it when missing).
+fn cmd_note_override(store: &Store, dirname: &str, rel: &str) -> anyhow::Result<()> {
+    let (full, path) = note_file(store, dirname, rel)?;
+    let body = read_stdin_body()?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    std::fs::write(&path, format!("{}\n", body.trim_matches('\n')))
+        .with_context(|| format!("failed to write {}", path.display()))?;
+    let message = format!("note override: {full}");
+    sync_in_background(store, &message)?;
+    println!("wrote: {full}");
+    Ok(())
+}
+
+/// Print the all-dirs listing (metadata, no bodies). Shared by bare
+/// `note show` and the unknown-dirname fallback.
+fn print_notes_bare(store: &Store, max: AccessLevel, json: bool) -> anyhow::Result<()> {
+    let index = Index::load(store.root())?;
+    let mut dirs = Vec::new();
+    for dirname in note::top_dirs(&store.notes_dir())? {
+        let view = note::dir_view(store.root(), &index, &dirname, max, false)?;
+        if view.security.allows(max) {
+            dirs.push(view);
+        }
+    }
+    let loose = note::loose_files_view(store.root(), &index, max, false)?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&note::bare_json(&dirs, &loose))?
+        );
+    } else {
+        print!("{}", note::render_bare(&dirs, &loose));
+    }
+    Ok(())
+}
+
+/// Read-only show: one dir recursive with bodies, or all dirs without.
+/// Unknown dirname errors and prints the all-dirs listing as a guide.
+fn cmd_note_show(
+    store: &Store,
+    dirname: Option<&str>,
+    json: bool,
+    max: AccessLevel,
+) -> anyhow::Result<()> {
+    let index = Index::load(store.root())?;
+    let Some(dirname) = dirname else {
+        return print_notes_bare(store, max, json);
+    };
+    let view = note::dir_view(store.root(), &index, dirname, max, true);
+    let visible = view.as_ref().is_ok_and(|v| v.security.allows(max));
+    match view {
+        Ok(view) if visible => {
+            if json {
+                println!("{}", serde_json::to_string_pretty(&note::dir_json(&view))?);
+            } else {
+                print!("{}", note::render_dir(&view));
+            }
+            Ok(())
+        }
+        // Unknown dirname — or above clearance (do not confirm it exists):
+        // error and print the all-dirs listing as a guide. Real IO errors pass through.
+        Ok(_) => {
+            print_notes_bare(store, max, false)?;
+            Err(ChoraError::NoteNoDir(dirname.to_owned()).into())
+        }
+        Err(err)
+            if matches!(
+                err.downcast_ref::<ChoraError>(),
+                Some(ChoraError::NoteNoDir(_))
+            ) =>
+        {
+            print_notes_bare(store, max, false)?;
+            Err(err)
+        }
+        Err(err) => Err(err),
+    }
+}
+
+/// Read-only header tree of a notes dir, recursive, with file names.
+/// `--path` scopes to files/subdirs inside (repeatable).
+fn cmd_note_headers(
+    store: &Store,
+    dirname: &str,
+    paths: &[String],
+    max: AccessLevel,
+) -> anyhow::Result<()> {
+    let index = Index::load(store.root())?;
+    let notes = store.notes_dir();
+    let dir = note::join_safe(&notes, dirname)?;
+    if !dir.is_dir() {
+        return Err(ChoraError::NoteNoDir(dirname.to_owned()).into());
+    }
+    let mut files = Vec::new();
+    if paths.is_empty() {
+        files.extend(note::collect_md(&dir)?);
+    } else {
+        for rel in paths {
+            let scoped = note::join_safe(&dir, rel)?;
+            if scoped.is_dir() {
+                files.extend(note::collect_md(&scoped)?);
+            } else if scoped.is_file() {
+                note::require_md(rel)?;
+                files.push(scoped);
+            } else {
+                return Err(ChoraError::NoteBadPath(format!("{dirname}/{rel}: not found")).into());
+            }
+        }
+        files.sort();
+    }
+    let mut shown = 0;
+    for abs in &files {
+        let rel = format!("{dirname}/{}", note::rel_of(&dir, abs));
+        let security = index.security_for(&rel);
+        if !security.allows(max) {
+            continue;
+        }
+        let text = std::fs::read_to_string(abs)
+            .with_context(|| format!("failed to read {}", abs.display()))?;
+        println!("{rel}:");
+        let headers = note::read_headers(&text);
+        if headers.is_empty() {
+            println!("  (no headers)");
+        }
+        for header in &headers {
+            println!(
+                "  {}: {} {}",
+                header.line,
+                "#".repeat(header.level),
+                header.title
+            );
+        }
+        shown += 1;
+    }
+    if shown == 0 {
+        println!("(no visible notes)");
+    }
+    Ok(())
+}
+
+/// Read-only: `index.md` context + security/about tree.
+/// Showing never creates storage and touches no network.
+fn cmd_index(store: &Store, json: bool, max: AccessLevel) -> anyhow::Result<()> {
+    let index = Index::load(store.root())?;
+    let mut warnings: Vec<String> = index
+        .visible_warnings(max)
+        .iter()
+        .map(|w| match &w.path {
+            Some(path) => format!("{path}: {}", w.msg),
+            None => w.msg.clone(),
+        })
+        .collect();
+    for extra in note::unknown_dir_warnings(&index, &store.notes_dir()) {
+        if extra
+            .path
+            .as_deref()
+            .is_some_and(|path| index.security_for(path).allows(max))
+        {
+            warnings.push(format!("{}: {}", extra.path.unwrap_or_default(), extra.msg));
+        }
+    }
+    if json {
+        let entries: Vec<serde_json::Value> = index
+            .visible(max)
+            .map(|e| {
+                serde_json::json!({
+                    "path": e.path,
+                    "security": e.security.as_str(),
+                    "about": e.about,
+                })
+            })
+            .collect();
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "context": index.context,
+                "entries": entries,
+                "warnings": warnings,
+            }))?
+        );
+    } else {
+        print!("{}", note::render_index(&index, max));
+    }
+    for warning in &warnings {
+        eprintln!("warning: {warning}");
+    }
+    Ok(())
 }

@@ -10,11 +10,13 @@ use chrono::NaiveDate;
 use clap::{CommandFactory, Parser, Subcommand};
 
 use crate::error::ChoraError;
+use crate::index::AccessLevel;
 
 /// Static footnotes: not part of the clap schema.
-const ANNOTATION: [&str; 2] = [
+const ANNOTATION: [&str; 3] = [
     "<DATE> is today, tomorrow, YYYY-MM-DD, or DD.MM.YYYY.",
     "Openers: `editor` for files, `open_dirs` for directories, $EDITOR when empty.",
+    "--max-access filters notes reads: open|restricted (default)|critical.",
 ];
 
 /// One tree row: a command (blue, bold) or an argument (green).
@@ -284,11 +286,22 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub debug: bool,
 
+    /// Notes read clearance: hides entries above this level in
+    /// `note show`, `note headers` and `chora index`. Writes are not gated.
+    #[arg(
+        long,
+        global = true,
+        value_enum,
+        value_name = "open|restricted|critical",
+        default_value = "restricted"
+    )]
+    pub max_access: AccessLevel,
+
     #[command(subcommand)]
     pub cmd: Option<Cmd>,
 }
 
-/// Which storage directory to open. A subcommand (not a value) so static
+/// Which storage entry to open. A subcommand (not a value) so static
 /// completions list it in every shell.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Subcommand)]
 pub enum OpenTarget {
@@ -298,6 +311,9 @@ pub enum OpenTarget {
     /// The `events/` directory.
     #[command(disable_help_flag = true)]
     Event,
+    /// The `index.md` context file (human-owned; agents must not write it).
+    #[command(disable_help_flag = true)]
+    Index,
 }
 
 /// Actions under `event`.
@@ -312,6 +328,56 @@ pub enum EventAction {
         /// JSON array for scripts.
         #[arg(long)]
         json: bool,
+    },
+}
+
+/// Actions under `note`.
+#[derive(Debug, Subcommand)]
+pub enum NoteAction {
+    /// Append stdin markdown to a note file (creates it when missing).
+    /// Without `--under` appends at the end, else directly under the header.
+    #[command(disable_help_flag = true)]
+    Add {
+        /// Notes subdir, e.g. `biletmir` (created when missing).
+        #[arg(value_name = "DIRNAME")]
+        dirname: String,
+        /// File inside the dir, e.g. `main.md` or `worker-task/high.md`.
+        #[arg(long, value_name = "PATH")]
+        path: String,
+        /// Header to insert under, e.g. `--under "Tasks"`.
+        #[arg(long, value_name = "HEADER")]
+        under: Option<String>,
+    },
+    /// Overwrite a note file with stdin markdown (creates it when missing).
+    #[command(disable_help_flag = true)]
+    Override {
+        /// Notes subdir, e.g. `biletmir` (created when missing).
+        #[arg(value_name = "DIRNAME")]
+        dirname: String,
+        /// File inside the dir, e.g. `main.md` or `worker-task/high.md`.
+        #[arg(long, value_name = "PATH")]
+        path: String,
+    },
+    /// Show notes: all dirs with metadata, or one dir recursive with bodies.
+    /// Unknown dirname errors and prints the all-dirs listing as a guide.
+    #[command(disable_help_flag = true)]
+    Show {
+        /// Notes subdir to show recursive with bodies. Empty = all dirs, no bodies.
+        #[arg(value_name = "DIRNAME")]
+        dirname: Option<String>,
+        /// JSON for scripts (`--max-access` still filters).
+        #[arg(long)]
+        json: bool,
+    },
+    /// List `#`-headers of a notes dir, recursive, with file names and lines.
+    #[command(disable_help_flag = true)]
+    Headers {
+        /// Notes subdir to scan.
+        #[arg(value_name = "DIRNAME")]
+        dirname: String,
+        /// Scope to files/subdirs inside (repeatable). Empty = whole dir.
+        #[arg(long, value_name = "PATH")]
+        path: Vec<String>,
     },
 }
 
@@ -344,6 +410,18 @@ pub enum Cmd {
         /// After submit, open the day file in the file opener right away.
         #[arg(long)]
         confirm: bool,
+        /// Event title for non-interactive creation.
+        #[arg(long, value_name = "TITLE")]
+        title: Option<String>,
+        /// Event time HH:MM (or H, e.g. 9 = 09:00).
+        #[arg(long, value_name = "TIME")]
+        time: Option<String>,
+        /// Event duration: 30m, 2h20m, 2h 20m, 2:00.
+        #[arg(long, value_name = "DURATION")]
+        duration: Option<String>,
+        /// Free-form body text for non-interactive creation.
+        #[arg(long, value_name = "BODY")]
+        body: Option<String>,
         #[command(subcommand)]
         action: Option<EventAction>,
     },
@@ -353,6 +431,22 @@ pub enum Cmd {
     /// Interactive TUI editor for all config settings.
     #[command(disable_help_flag = true)]
     Settings,
+    /// Agent-readable notes: add/override/show/headers under `notes/`.
+    #[command(disable_help_flag = true)]
+    Note {
+        #[command(subcommand)]
+        action: NoteAction,
+    },
+    /// Show `index.md` context + security/about tree (`--json` for scripts).
+    #[command(disable_help_flag = true)]
+    Index {
+        /// JSON object for scripts (`--max-access` still filters).
+        #[arg(long)]
+        json: bool,
+    },
+    /// Short machine-readable usage for AI agents (same as `skill`).
+    #[command(alias = "skill", disable_help_flag = true)]
+    Help,
     /// Print shell completions to stdout.
     #[command(alias = "completions", disable_help_flag = true)]
     Completion {
@@ -360,6 +454,102 @@ pub enum Cmd {
         #[arg(value_enum, value_name = "bash|fish")]
         shell: CompletionShell,
     },
+}
+
+/// Top-level commands agents must never call: they block on an editor or TUI,
+/// or bootstrap the human-owned config.
+const AGENT_BANNED: [&str; 4] = ["open", "calendar", "settings", "init"];
+
+/// Compressed command list from the clap schema (same source as the tree).
+/// Skips banned interactive commands and `help` itself.
+fn skill_commands() -> Vec<String> {
+    fn walk(cmd: &clap::Command, prefix: &str, out: &mut Vec<String>) {
+        for sub in cmd.get_subcommands().filter(|sub| !sub.is_hide_set()) {
+            let path = if prefix.is_empty() {
+                sub.get_name().to_owned()
+            } else {
+                format!("{prefix} {}", sub.get_name())
+            };
+            if AGENT_BANNED.contains(&sub.get_name()) || sub.get_name() == "help" {
+                continue;
+            }
+            let args: Vec<String> = sub
+                .get_arguments()
+                .filter(|arg| visible_arg(arg))
+                // `--confirm` opens an editor: banned for agents, hidden here.
+                .filter(|arg| arg.get_long() != Some("confirm"))
+                .map(|arg| {
+                    let head = arg_head(arg);
+                    // Optional positionals read as required (`<X>`); mark them.
+                    if arg.get_long().is_none() && !arg.is_required_set() {
+                        format!("[{head}]")
+                    } else {
+                        head
+                    }
+                })
+                .collect();
+            let mut line = format!("chora {path}");
+            if !args.is_empty() {
+                line.push(' ');
+                line.push_str(&args.join(" "));
+            }
+            let about = about_of(sub);
+            if !about.is_empty() {
+                line.push_str(&format!(" — {about}"));
+            }
+            out.push(line);
+            walk(sub, &path, out);
+        }
+    }
+    let mut out = Vec::new();
+    let globals: Vec<String> = Cli::command()
+        .get_arguments()
+        .filter(|arg| visible_arg(arg))
+        .map(arg_head)
+        .collect();
+    if !globals.is_empty() {
+        out.push(format!("chora {} <command>", globals.join(" ")));
+    }
+    walk(&Cli::command(), "", &mut out);
+    out
+}
+
+/// Short machine-readable usage for AI agents. Plain text, no colors.
+/// Command lines come from the clap schema (see [`skill_commands`]);
+/// only the policy block below is static.
+#[must_use]
+pub fn render_skill_help() -> String {
+    let mut lines: Vec<String> = [
+        "chora: markdown notes + day events in a git repo. No daemons.",
+        "",
+        "Storage (default ~/chora): notes/<DIR>/...md, nested ok; events/YYYY-MM-DD.md;",
+        "events/repeatable/<weekday>.md; index.md at storage root is HUMAN-owned.",
+        "",
+        "Commands:",
+    ]
+    .into_iter()
+    .map(String::from)
+    .collect();
+    lines.extend(skill_commands());
+    lines.extend(
+        [
+            "",
+            "Forbidden (interactive or human-owned — never use): open, calendar,",
+            "settings, init, bare `event`, `event --date` alone, `--confirm`.",
+            "`event` only as: --title <T> --time <HH:MM> --duration <DUR> [--date] [--body].",
+            "Note bodies only via stdin pipe: printf '# T\\n' | chora note override <D> --path <F>.",
+            "<DATE>: today|tomorrow|YYYY-MM-DD|DD.MM.YYYY. <TIME>: HH:MM or H (9 = 09:00).",
+            "<DUR>: 30m, 2h20m, 2h 20m, 2:00 (=2h), 1:30 (=1h30m), 10s.",
+            "index.md: agents never write it. --max-access open|restricted|critical",
+            "(default restricted) filters notes reads: open sees only open,",
+            "restricted sees open+restricted, critical sees all.",
+            "Read with --json; day output sorted by time; unknown note dir errors + lists all.",
+            "",
+        ]
+        .into_iter()
+        .map(String::from),
+    );
+    lines.join("\n")
 }
 
 /// Today (local date).
@@ -421,7 +611,13 @@ mod tests {
         for name in names {
             assert!(plain.contains(&name), "tree misses `{name}`");
         }
-        for token in ["completion", "<bash|fish>", "--dir <PATH>", "--debug"] {
+        for token in [
+            "completion",
+            "<bash|fish>",
+            "--dir <PATH>",
+            "--debug",
+            "--max-access",
+        ] {
             assert!(plain.contains(token), "tree misses `{token}`");
         }
         assert!(!plain.contains("sync-after-open"));
@@ -576,7 +772,8 @@ mod tests {
             Some(Cmd::Event {
                 confirm: true,
                 date: None,
-                action: None
+                action: None,
+                ..
             })
         ));
         let cli = Cli::try_parse_from(["chora", "event"]).unwrap();
@@ -585,9 +782,143 @@ mod tests {
             Some(Cmd::Event {
                 confirm: false,
                 date: None,
-                action: None
+                action: None,
+                ..
             })
         ));
+    }
+
+    #[test]
+    fn parses_event_direct_flags() {
+        let cli = Cli::try_parse_from([
+            "chora",
+            "event",
+            "--date",
+            "2026-11-20",
+            "--title",
+            "Standup",
+            "--time",
+            "10:00",
+            "--duration",
+            "30m",
+            "--body",
+            "Agenda.",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.cmd,
+            Some(Cmd::Event {
+                title: Some(_),
+                time: Some(_),
+                duration: Some(_),
+                body: Some(_),
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn parses_help_and_skill_alias() {
+        for name in ["help", "skill"] {
+            let cli = Cli::try_parse_from(["chora", name]).unwrap();
+            assert!(matches!(cli.cmd, Some(Cmd::Help)));
+        }
+    }
+
+    #[test]
+    fn skill_help_is_plain_and_short() {
+        let text = render_skill_help();
+        // Dynamic: every allowed command path is listed, banned ones are not.
+        for path in [
+            "chora event",
+            "chora event show",
+            "chora note",
+            "chora note add",
+            "chora note override",
+            "chora note show",
+            "chora note headers",
+            "chora index",
+        ] {
+            assert!(text.contains(path), "skill misses `{path}`");
+        }
+        for banned in [
+            "chora open",
+            "chora calendar",
+            "chora settings",
+            "chora init",
+        ] {
+            assert!(
+                !text.contains(banned),
+                "skill lists banned `{banned}` as a command"
+            );
+        }
+        assert!(text.contains("Forbidden"));
+        assert!(
+            !text.contains("--confirm --title"),
+            "skill advertises --confirm"
+        );
+        assert!(text.contains("--max-access"));
+        assert!(!text.contains('\u{1b}'));
+        assert!(text.lines().count() < 60);
+    }
+
+    #[test]
+    fn max_access_defaults_to_restricted() {
+        use crate::index::AccessLevel;
+        let cli = Cli::try_parse_from(["chora", "calendar"]).unwrap();
+        assert_eq!(cli.max_access, AccessLevel::Restricted);
+        let cli = Cli::try_parse_from(["chora", "--max-access", "open", "calendar"]).unwrap();
+        assert_eq!(cli.max_access, AccessLevel::Open);
+        assert!(Cli::try_parse_from(["chora", "--max-access", "staff", "calendar"]).is_err());
+    }
+
+    #[test]
+    fn parses_note_subcommands() {
+        let cli = Cli::try_parse_from(["chora", "note", "show", "biletmir", "--json"]).unwrap();
+        assert!(matches!(
+            cli.cmd,
+            Some(Cmd::Note {
+                action: NoteAction::Show { json: true, .. }
+            })
+        ));
+        let cli = Cli::try_parse_from(["chora", "note", "show"]).unwrap();
+        assert!(matches!(
+            cli.cmd,
+            Some(Cmd::Note {
+                action: NoteAction::Show {
+                    dirname: None,
+                    json: false
+                }
+            })
+        ));
+        let cli = Cli::try_parse_from([
+            "chora", "note", "add", "biletmir", "--path", "main.md", "--under", "Tasks",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.cmd,
+            Some(Cmd::Note {
+                action: NoteAction::Add { .. }
+            })
+        ));
+        let cli =
+            Cli::try_parse_from(["chora", "note", "override", "biletmir", "--path", "main.md"])
+                .unwrap();
+        assert!(matches!(
+            cli.cmd,
+            Some(Cmd::Note {
+                action: NoteAction::Override { .. }
+            })
+        ));
+        let cli = Cli::try_parse_from(["chora", "note", "headers", "biletmir"]).unwrap();
+        assert!(matches!(
+            cli.cmd,
+            Some(Cmd::Note {
+                action: NoteAction::Headers { .. }
+            })
+        ));
+        let cli = Cli::try_parse_from(["chora", "index", "--json"]).unwrap();
+        assert!(matches!(cli.cmd, Some(Cmd::Index { json: true })));
     }
 
     #[test]

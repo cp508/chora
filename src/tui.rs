@@ -312,7 +312,9 @@ impl App {
             return;
         }
         if parse_duration(&self.duration).is_err() {
-            self.error = Some(String::from("bad duration: expected 45m, 2h, 1h30m"));
+            self.error = Some(String::from(
+                "bad duration: expected 30m, 2h20m, 2h 20m, 2:00",
+            ));
             return;
         }
         crate::debug_log!(
