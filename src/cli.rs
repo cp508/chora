@@ -16,7 +16,7 @@ use crate::index::AccessLevel;
 const ANNOTATION: [&str; 3] = [
     "<DATE> is today, tomorrow, YYYY-MM-DD, or DD.MM.YYYY.",
     "Openers: `editor` for files, `open_dirs` for directories, $EDITOR when empty.",
-    "--max-access filters notes reads: open|restricted (default)|critical.",
+    "--max-access gates notes reads/writes: open|restricted (default)|critical.",
 ];
 
 /// One tree row: a command (blue, bold) or an argument (green).
@@ -286,8 +286,8 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub debug: bool,
 
-    /// Notes read clearance: hides entries above this level in
-    /// `note show`, `note headers` and `chora index`. Writes are not gated.
+    /// Notes clearance: hides or refuses entries above this level in
+    /// `note show`, `note headers`, `note add`, `note override` and `chora index`.
     #[arg(
         long,
         global = true,
@@ -335,23 +335,23 @@ pub enum EventAction {
 #[derive(Debug, Subcommand)]
 pub enum NoteAction {
     /// Append stdin markdown to a note file (creates it when missing).
-    /// Without `--under` appends at the end, else directly under the header.
+    /// Without `--under` appends at the end, else at the end of the section.
     #[command(disable_help_flag = true)]
     Add {
-        /// Notes subdir, e.g. `biletmir` (created when missing).
+        /// Notes subdir (`.` = notes root, e.g. for loose `now.md` files).
         #[arg(value_name = "DIRNAME")]
         dirname: String,
         /// File inside the dir, e.g. `main.md` or `worker-task/high.md`.
         #[arg(long, value_name = "PATH")]
         path: String,
-        /// Header to insert under, e.g. `--under "Tasks"`.
+        /// Header or `Parent/Child` path to append under, e.g. `--under "Tasks"`.
         #[arg(long, value_name = "HEADER")]
         under: Option<String>,
     },
     /// Overwrite a note file with stdin markdown (creates it when missing).
     #[command(disable_help_flag = true)]
     Override {
-        /// Notes subdir, e.g. `biletmir` (created when missing).
+        /// Notes subdir (`.` = notes root).
         #[arg(value_name = "DIRNAME")]
         dirname: String,
         /// File inside the dir, e.g. `main.md` or `worker-task/high.md`.
@@ -362,9 +362,13 @@ pub enum NoteAction {
     /// Unknown dirname errors and prints the all-dirs listing as a guide.
     #[command(disable_help_flag = true)]
     Show {
-        /// Notes subdir to show recursive with bodies. Empty = all dirs, no bodies.
+        /// Notes subdir to show recursive with bodies (`.` = notes root).
+        /// Empty = all dirs, no bodies.
         #[arg(value_name = "DIRNAME")]
         dirname: Option<String>,
+        /// Scope to files/subdirs inside (repeatable, root-relative with `.`).
+        #[arg(long, value_name = "PATH")]
+        path: Vec<String>,
         /// JSON for scripts (`--max-access` still filters).
         #[arg(long)]
         json: bool,
@@ -372,7 +376,7 @@ pub enum NoteAction {
     /// List `#`-headers of a notes dir, recursive, with file names and lines.
     #[command(disable_help_flag = true)]
     Headers {
-        /// Notes subdir to scan.
+        /// Notes subdir to scan (`.` = notes root).
         #[arg(value_name = "DIRNAME")]
         dirname: String,
         /// Scope to files/subdirs inside (repeatable). Empty = whole dir.
@@ -541,8 +545,8 @@ pub fn render_skill_help() -> String {
             "<DATE>: today|tomorrow|YYYY-MM-DD|DD.MM.YYYY. <TIME>: HH:MM or H (9 = 09:00).",
             "<DUR>: 30m, 2h20m, 2h 20m, 2:00 (=2h), 1:30 (=1h30m), 10s.",
             "index.md: agents never write it. --max-access open|restricted|critical",
-            "(default restricted) filters notes reads: open sees only open,",
-            "restricted sees open+restricted, critical sees all.",
+            "(default restricted) gates notes reads and writes: open sees/writes only open,",
+            "restricted sees/writes open+restricted, critical sees/writes all.",
             "Read with --json; day output sorted by time; unknown note dir errors + lists all.",
             "",
         ]
@@ -887,9 +891,31 @@ mod tests {
             Some(Cmd::Note {
                 action: NoteAction::Show {
                     dirname: None,
-                    json: false
+                    json: false,
+                    ..
                 }
             })
+        ));
+        let cli = Cli::try_parse_from([
+            "chora",
+            "note",
+            "show",
+            ".",
+            "--path",
+            "now.md",
+            "--path",
+            "docs/a.md",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.cmd,
+            Some(Cmd::Note {
+                action: NoteAction::Show {
+                    dirname: Some(_),
+                    path,
+                    json: false,
+                }
+            }) if path == vec!["now.md".to_owned(), "docs/a.md".to_owned()]
         ));
         let cli = Cli::try_parse_from([
             "chora", "note", "add", "biletmir", "--path", "main.md", "--under", "Tasks",

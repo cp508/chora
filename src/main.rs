@@ -43,7 +43,8 @@ fn main() -> anyhow::Result<()> {
         Cmd::Init => cmd_init(),
         Cmd::Settings => cmd_settings(),
         Cmd::Help => {
-            page_or_print(&render_skill_help());
+            // Machine-readable output for agents: never paged.
+            print!("{}", render_skill_help());
             Ok(())
         }
         Cmd::Completion { shell } => cmd_completion(shell),
@@ -94,16 +95,20 @@ fn main() -> anyhow::Result<()> {
                 } => {
                     let (_cfg, store) = load_store(cli.dir.as_deref(), true)?;
                     require_repo(&store)?;
-                    cmd_note_add(&store, &dirname, &path, under.as_deref())
+                    cmd_note_add(&store, &dirname, &path, under.as_deref(), cli.max_access)
                 }
                 NoteAction::Override { dirname, path } => {
                     let (_cfg, store) = load_store(cli.dir.as_deref(), true)?;
                     require_repo(&store)?;
-                    cmd_note_override(&store, &dirname, &path)
+                    cmd_note_override(&store, &dirname, &path, cli.max_access)
                 }
-                NoteAction::Show { dirname, json } => {
+                NoteAction::Show {
+                    dirname,
+                    path,
+                    json,
+                } => {
                     let (_cfg, store) = load_store(cli.dir.as_deref(), false)?;
-                    cmd_note_show(&store, dirname.as_deref(), json, max)
+                    cmd_note_show(&store, dirname.as_deref(), &path, json, max)
                 }
                 NoteAction::Headers { dirname, path } => {
                     let (_cfg, store) = load_store(cli.dir.as_deref(), false)?;
@@ -456,7 +461,10 @@ fn cmd_event_add(
     if day >= today() {
         sweep_old_events(store, cfg)?;
     }
-    store.append_section(day, &rendered)?;
+    sync::with_sync_lock(store.root(), || {
+        store.append_section(day, &rendered)?;
+        Ok(())
+    })?;
     if confirm {
         let path = store.ensure_day_file(day)?;
         sync::with_auto_commit(store.root(), cfg.main.auto_commit, "event", || {
@@ -482,8 +490,11 @@ fn open_day_file(store: &Store, cfg: &Config, day: chrono::NaiveDate) -> anyhow:
     if day >= today() {
         sweep_old_events(store, cfg)?;
     }
-    let path = store.ensure_day_file(day)?;
-    store.append_section(day, "## \nTime: \nDuration: \n")?;
+    let path = sync::with_sync_lock(store.root(), || {
+        let path = store.ensure_day_file(day)?;
+        store.append_section(day, "## \nTime: \nDuration: \n")?;
+        Ok(path)
+    })?;
     sync::with_auto_commit(store.root(), cfg.main.auto_commit, "event", || {
         editor::open(&path, store.root(), &cfg.main.editor)
     })?;
@@ -508,7 +519,10 @@ fn cmd_event_tui(store: &Store, cfg: &Config, confirm: bool) -> anyhow::Result<(
     });
     // No network up here either: the form opens instantly, the merge
     // happens in the detached child after submit.
-    store.append_section(data.date, &rendered)?;
+    sync::with_sync_lock(store.root(), || {
+        store.append_section(data.date, &rendered)?;
+        Ok(())
+    })?;
     let message = format!("event: {} {}", data.date.format("%Y-%m-%d"), data.title);
     sweep_old_events(store, cfg)?;
     if confirm {
@@ -535,50 +549,71 @@ fn read_stdin_body() -> anyhow::Result<String> {
 }
 
 /// Resolve `notes/<dirname>/<rel>` safely and check the `.md` suffix.
+/// `.` addresses the notes root itself (loose `notes/*.md` files).
 fn note_file(store: &Store, dirname: &str, rel: &str) -> anyhow::Result<(String, PathBuf)> {
     note::require_md(rel)?;
-    let full = format!("{dirname}/{rel}");
+    let full = if dirname == "." {
+        rel.to_owned()
+    } else {
+        format!("{dirname}/{rel}")
+    };
     let path = note::join_safe(&store.notes_dir(), &full)?;
     Ok((full, path))
 }
 
 /// Append stdin markdown to a note file (creates it when missing).
-/// `--under` inserts below the first matching header instead of the end.
+/// `--under` inserts at the end of the first matching section instead.
+/// Refuses targets above `max` clearance; the disk write holds the sync
+/// lock so it never interleaves with a background pull --rebase.
 fn cmd_note_add(
     store: &Store,
     dirname: &str,
     rel: &str,
     under: Option<&str>,
+    max: AccessLevel,
 ) -> anyhow::Result<()> {
     let (full, path) = note_file(store, dirname, rel)?;
+    let index = Index::load(store.root())?;
+    let need = index.security_for(&full);
+    if !need.allows(max) {
+        return Err(ChoraError::NoteDenied {
+            path: full,
+            need: need.as_str(),
+            max: max.as_str(),
+        }
+        .into());
+    }
     let body = read_stdin_body()?;
     let body = format!("{}\n", body.trim_matches('\n'));
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create {}", parent.display()))?;
-    }
-    if path.exists() {
-        let mut text = std::fs::read_to_string(&path)
-            .with_context(|| format!("failed to read {}", path.display()))?;
-        if let Some(header) = under {
-            text = note::insert_under(&text, header, body.trim_matches('\n'))?;
-        } else {
-            if !text.ends_with('\n') {
+    sync::with_sync_lock(store.root(), || {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create {}", parent.display()))?;
+        }
+        if path.exists() {
+            let mut text = std::fs::read_to_string(&path)
+                .with_context(|| format!("failed to read {}", path.display()))?;
+            if let Some(header) = under {
+                text = note::insert_under(&text, header, body.trim_matches('\n'))?;
+            } else {
+                if !text.ends_with('\n') {
+                    text.push('\n');
+                }
+                text.push('\n');
+                text.push_str(body.trim_matches('\n'));
                 text.push('\n');
             }
-            text.push('\n');
-            text.push_str(body.trim_matches('\n'));
-            text.push('\n');
+            std::fs::write(&path, text)
+                .with_context(|| format!("failed to write {}", path.display()))?;
+        } else {
+            if under.is_some() {
+                anyhow::bail!("no such file `{full}`: `--under` needs an existing file");
+            }
+            std::fs::write(&path, &body)
+                .with_context(|| format!("failed to write {}", path.display()))?;
         }
-        std::fs::write(&path, text)
-            .with_context(|| format!("failed to write {}", path.display()))?;
-    } else {
-        if under.is_some() {
-            anyhow::bail!("no such file `{full}`: `--under` needs an existing file");
-        }
-        std::fs::write(&path, &body)
-            .with_context(|| format!("failed to write {}", path.display()))?;
-    }
+        Ok(())
+    })?;
     let message = format!("note add: {full}");
     sync_in_background(store, &message)?;
     println!("appended: {full}");
@@ -586,15 +621,34 @@ fn cmd_note_add(
 }
 
 /// Overwrite a note file with stdin markdown (creates it when missing).
-fn cmd_note_override(store: &Store, dirname: &str, rel: &str) -> anyhow::Result<()> {
+/// Refuses targets above `max` clearance; the disk write holds the sync lock.
+fn cmd_note_override(
+    store: &Store,
+    dirname: &str,
+    rel: &str,
+    max: AccessLevel,
+) -> anyhow::Result<()> {
     let (full, path) = note_file(store, dirname, rel)?;
-    let body = read_stdin_body()?;
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create {}", parent.display()))?;
+    let index = Index::load(store.root())?;
+    let need = index.security_for(&full);
+    if !need.allows(max) {
+        return Err(ChoraError::NoteDenied {
+            path: full,
+            need: need.as_str(),
+            max: max.as_str(),
+        }
+        .into());
     }
-    std::fs::write(&path, format!("{}\n", body.trim_matches('\n')))
-        .with_context(|| format!("failed to write {}", path.display()))?;
+    let body = read_stdin_body()?;
+    sync::with_sync_lock(store.root(), || {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create {}", parent.display()))?;
+        }
+        std::fs::write(&path, format!("{}\n", body.trim_matches('\n')))
+            .with_context(|| format!("failed to write {}", path.display()))?;
+        Ok(())
+    })?;
     let message = format!("note override: {full}");
     sync_in_background(store, &message)?;
     println!("wrote: {full}");
@@ -607,8 +661,9 @@ fn print_notes_bare(store: &Store, max: AccessLevel, json: bool) -> anyhow::Resu
     let index = Index::load(store.root())?;
     let mut dirs = Vec::new();
     for dirname in note::top_dirs(&store.notes_dir())? {
-        let view = note::dir_view(store.root(), &index, &dirname, max, false)?;
-        if view.security.allows(max) {
+        let view = note::dir_view(store.root(), &index, &dirname, max, false, &[])?;
+        // A dir above clearance still shows when it holds visible files.
+        if view.security.allows(max) || !view.files.is_empty() {
             dirs.push(view);
         }
     }
@@ -624,20 +679,40 @@ fn print_notes_bare(store: &Store, max: AccessLevel, json: bool) -> anyhow::Resu
     Ok(())
 }
 
-/// Read-only show: one dir recursive with bodies, or all dirs without.
-/// Unknown dirname errors and prints the all-dirs listing as a guide.
+/// Read-only show: one dir (or root `.`) recursive with bodies,
+/// optionally scoped by `--path`; or all dirs with metadata when neither
+/// is given. Unknown dirname errors and prints the all-dirs listing.
 fn cmd_note_show(
     store: &Store,
     dirname: Option<&str>,
+    scopes: &[String],
     json: bool,
     max: AccessLevel,
 ) -> anyhow::Result<()> {
     let index = Index::load(store.root())?;
-    let Some(dirname) = dirname else {
-        return print_notes_bare(store, max, json);
+    let (None, true) = (dirname, scopes.is_empty()) else {
+        let view = match dirname {
+            None | Some(".") => note::root_view(store.root(), &index, max, true, scopes),
+            Some(dirname) => note::dir_view(store.root(), &index, dirname, max, true, scopes),
+        };
+        return print_scoped_view(store, dirname, scopes, view, json, max);
     };
-    let view = note::dir_view(store.root(), &index, dirname, max, true);
-    let visible = view.as_ref().is_ok_and(|v| v.security.allows(max));
+    print_notes_bare(store, max, json)
+}
+
+/// Print one scoped view, or the all-dirs listing + error on unknown dir.
+/// Above clearance without visible files also lands here (no confirmation).
+fn print_scoped_view(
+    store: &Store,
+    dirname: Option<&str>,
+    scopes: &[String],
+    view: anyhow::Result<note::DirView>,
+    json: bool,
+    max: AccessLevel,
+) -> anyhow::Result<()> {
+    let visible = view
+        .as_ref()
+        .is_ok_and(|v| v.security.allows(max) || !v.files.is_empty());
     match view {
         Ok(view) if visible => {
             if json {
@@ -651,7 +726,7 @@ fn cmd_note_show(
         // error and print the all-dirs listing as a guide. Real IO errors pass through.
         Ok(_) => {
             print_notes_bare(store, max, false)?;
-            Err(ChoraError::NoteNoDir(dirname.to_owned()).into())
+            Err(ChoraError::NoteNoDir(scoped_name(dirname, scopes)).into())
         }
         Err(err)
             if matches!(
@@ -666,6 +741,14 @@ fn cmd_note_show(
     }
 }
 
+/// Name for the unknown-scope error: the dirname, or the first scope.
+fn scoped_name(dirname: Option<&str>, scopes: &[String]) -> String {
+    match dirname {
+        Some(name) => name.to_owned(),
+        None => scopes.first().cloned().unwrap_or_default(),
+    }
+}
+
 /// Read-only header tree of a notes dir, recursive, with file names.
 /// `--path` scopes to files/subdirs inside (repeatable).
 fn cmd_note_headers(
@@ -676,30 +759,29 @@ fn cmd_note_headers(
 ) -> anyhow::Result<()> {
     let index = Index::load(store.root())?;
     let notes = store.notes_dir();
-    let dir = note::join_safe(&notes, dirname)?;
+    let dir = if dirname == "." {
+        notes.clone()
+    } else {
+        note::join_safe(&notes, dirname)?
+    };
     if !dir.is_dir() {
         return Err(ChoraError::NoteNoDir(dirname.to_owned()).into());
     }
-    let mut files = Vec::new();
-    if paths.is_empty() {
-        files.extend(note::collect_md(&dir)?);
-    } else {
-        for rel in paths {
-            let scoped = note::join_safe(&dir, rel)?;
-            if scoped.is_dir() {
-                files.extend(note::collect_md(&scoped)?);
-            } else if scoped.is_file() {
-                note::require_md(rel)?;
-                files.push(scoped);
-            } else {
-                return Err(ChoraError::NoteBadPath(format!("{dirname}/{rel}: not found")).into());
+    let files = note::collect_scoped(&dir, paths).map_err(|err| {
+        match err.downcast_ref::<ChoraError>() {
+            Some(ChoraError::NoteBadPath(msg)) if dirname != "." => {
+                ChoraError::NoteBadPath(format!("{dirname}/{msg}")).into()
             }
+            _ => err,
         }
-        files.sort();
-    }
+    })?;
     let mut shown = 0;
     for abs in &files {
-        let rel = format!("{dirname}/{}", note::rel_of(&dir, abs));
+        let rel = if dirname == "." {
+            note::rel_of(&dir, abs)
+        } else {
+            format!("{dirname}/{}", note::rel_of(&dir, abs))
+        };
         let security = index.security_for(&rel);
         if !security.allows(max) {
             continue;

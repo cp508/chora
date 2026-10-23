@@ -53,6 +53,13 @@ pub enum ChoraError {
     #[error("empty body: pipe markdown via stdin, e.g. printf '# T\\n' | chora note ...")]
     NoteEmptyBody,
 
+    #[error("refusing to write `{path}`: needs {need} clearance (max-access {max})")]
+    NoteDenied {
+        path: String,
+        need: &'static str,
+        max: &'static str,
+    },
+
     #[error(
         "pass either creation flags (--date/--confirm/--title/--time/--duration/--body) or `show`, not both"
     )]

@@ -86,8 +86,12 @@ pub fn sync_after_open(store: &Store, message: &str) -> anyhow::Result<()> {
 
 /// Serialize add/commit/pull/push across concurrent chora processes via
 /// a kernel file lock on `.git/chora-sync.lock` (released automatically by
-/// the OS if the holder exits or crashes).
-fn with_sync_lock(root: &Path, sync: impl FnOnce() -> anyhow::Result<()>) -> anyhow::Result<()> {
+/// the OS if the holder exits or crashes). Foreground file writes take it
+/// too, so they never interleave with a background pull --rebase.
+pub fn with_sync_lock<T>(
+    root: &Path,
+    sync: impl FnOnce() -> anyhow::Result<T>,
+) -> anyhow::Result<T> {
     let lock = root.join(".git").join("chora-sync.lock");
     let file = std::fs::OpenOptions::new()
         .create(true)

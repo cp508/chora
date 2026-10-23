@@ -33,19 +33,18 @@ Bare `chora` prints the whole tree (through `less -R` on a terminal, colors kept
 
 - `init` — bootstrap the config. No flags, never touches the storage.
 - `open <note|event|index>` — open a directory (or `index.md`) in the opener. On exit, in the background: pull (rebase), commit, push. The shell is back instantly, the log is `sync.log` (see below). `open index` edits the human-owned `index.md`.
-- `note add <DIR> --path <FILE> [--under <HEADER>]` — append stdin markdown to a note file (creates it when missing). With `--under`, inserts below the first matching header.
+- `note add <DIR> --path <FILE> [--under <HEADER>]` — append stdin markdown to a note file (creates it when missing). With `--under` (`Header` or `Parent/Child`), appends at the end of that section. `<DIR>` `.` = notes root.
 - `note override <DIR> --path <FILE>` — rewrite a note file with stdin markdown (creates it when missing).
-- `note show [<DIR>] [--json]` — all dirs with `security`/`about` (no bodies), or one dir recursive with bodies (`path` + markdown). Unknown `<DIR>` errors and prints the all-dirs listing. `--json` prints an object for scripts.
+- `note show [<DIR>] [--path <FILE>]... [--json]` — all dirs with `security`/`about` (no bodies), or one dir / `.` (notes root) recursive with bodies, optionally scoped by `--path`. Unknown `<DIR>` errors and prints the all-dirs listing. `--json` prints an object for scripts.
 - `note headers <DIR> [--path <FILE>]...` — `#`-header tree with file names and line numbers, recursive.
 - `index [--json]` — show `index.md` context + `security`/`about` tree. Warnings go to stderr.
-- `event --date <DATE> --title <TITLE> --time <TIME> --duration <DUR> [--body <TEXT>] [--confirm]` — create an event at once, no editor. `--date` defaults to today. Sync runs in the background.
 - `event --date <DATE> --title <TITLE> --time <TIME> --duration <DUR> [--body <TEXT>] [--confirm]` — create an event at once, no editor. `--date` defaults to today. Sync runs in the background.
 - `event --date <DATE>` — append an event stub to the day file and open it in the file opener. Sync runs in the background after closing.
 - `event [--confirm]` — TUI form for creating an event. With `--confirm`, opens the day file after submit.
 - `event show [--date <DATE>] [--json]` — show events: one day plus its repeatables with `--date`, all days in a row without. `--json` prints an array for scripts.
 - `calendar` — read-only month grid with event markers. Arrows/hjkl move, Enter opens the day, `t` jumps to today, `q` quits. Day-file events use `[calendar] day_color`, weekday repeatables use `repeat_color` (unless `show_repeat = false`).
 - `settings` — interactive TUI editor for all settings in `~/.config/chora/config.toml`.
-- `help` (`skill`) — short machine-readable usage for AI agents.
+- `help` (`skill`) — short machine-readable usage for AI agents (always printed directly, never paged).
 - `completion <bash|fish>` — print shell completions to stdout.
 
 `<DATE>` is `today`, `tomorrow`, `YYYY-MM-DD`, or `DD.MM.YYYY` (e.g. `20.05.2026`).
@@ -82,15 +81,17 @@ about: production passwords
 
 - `###` names a top-level dir; deeper `#` = deeper path
   (`#### guides` + `##### install.md` under `### docs` = `docs/guides/install.md`).
-- Missing entry = `open` + empty `about`. Bad `security` = `open` + warning.
+- Missing entry = `open` + empty `about`. Bad `security` = hard error
+  (a typo must not silently downgrade a note to `open`).
+  Children without `security` inherit their parent's.
   `security` inherits (longest-prefix match, `open < restricted < critical`),
   but `about` never flows down: an h3 `about` stays on its own dir.
   Empty `about` falls back to the file's own h1 (`# Guide` → `Guide`);
   an explicit `about` in `index.md` always wins.
 - `--max-access <open|restricted|critical>` (global flag, default `restricted`)
-  filters `note show`, `note headers` and `chora index`:
-  `open` sees only `open`, `restricted` sees `open`+`restricted`, `critical` sees all.
-  Writes are not gated. Events have no levels.
+  gates `note show`, `note headers`, `note add`, `note override` and `chora index`:
+  `open` sees/writes only `open`, `restricted` sees/writes `open`+`restricted`, `critical` sees/writes all.
+  Events have no levels.
 - nvim completion for `security:` levels (`open`, `restricted`, `critical`)
   via blink-cmp: `editors/nvim/chora-index.lua` is a blink source module —
   register it as a provider (shows in the Tab menu on `security:` lines

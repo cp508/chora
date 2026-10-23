@@ -50,32 +50,54 @@ pub struct MdHeader {
     pub line: usize,
 }
 
+/// Opening fence marker (``` / ~~~, info string allowed): `(char, length)`.
+fn fence_marker(trimmed: &str) -> Option<(char, usize)> {
+    let ch = trimmed.chars().next()?;
+    if ch != '`' && ch != '~' {
+        return None;
+    }
+    let len = trimmed.chars().take_while(|&c| c == ch).count();
+    (len >= 3).then_some((ch, len))
+}
+
 /// All `#`-headers of a markdown text, in file order.
+/// Lines inside fenced code blocks are not headers.
 #[must_use]
 pub fn read_headers(text: &str) -> Vec<MdHeader> {
-    text.lines()
-        .enumerate()
-        .filter_map(|(index, line)| {
-            let trimmed = line.trim_start();
-            let hashes = trimmed.len() - trimmed.trim_start_matches('#').len();
-            if hashes == 0 || hashes > 6 {
-                return None;
+    let mut out = Vec::new();
+    let mut fence: Option<(char, usize)> = None;
+    for (index, line) in text.lines().enumerate() {
+        let trimmed = line.trim_start();
+        if let Some((ch, len)) = fence_marker(trimmed) {
+            match fence {
+                Some((open, open_len)) if ch == open && len >= open_len => fence = None,
+                None => fence = Some((ch, len)),
+                _ => {}
             }
-            let rest = &trimmed[hashes..];
-            if !(rest.is_empty() || rest.starts_with(' ') || rest.starts_with('\t')) {
-                return None;
-            }
-            let title = rest.trim().to_owned();
-            if title.is_empty() {
-                return None;
-            }
-            Some(MdHeader {
-                level: hashes,
-                title,
-                line: index + 1,
-            })
-        })
-        .collect()
+            continue;
+        }
+        if fence.is_some() {
+            continue;
+        }
+        let hashes = trimmed.len() - trimmed.trim_start_matches('#').len();
+        if hashes == 0 || hashes > 6 {
+            continue;
+        }
+        let rest = &trimmed[hashes..];
+        if !(rest.is_empty() || rest.starts_with(' ') || rest.starts_with('\t')) {
+            continue;
+        }
+        let title = rest.trim().to_owned();
+        if title.is_empty() {
+            continue;
+        }
+        out.push(MdHeader {
+            level: hashes,
+            title,
+            line: index + 1,
+        });
+    }
+    out
 }
 
 /// The file's own h1 (`# Guide` → `Guide`), if any.
@@ -125,24 +147,60 @@ pub fn rel_of(base: &Path, abs: &Path) -> String {
         .unwrap_or_default()
 }
 
-/// Insert `body` directly under the first header titled `header`.
+/// Insert `body` at the end of the first section matching `header`.
+/// `header` is a title (`Tasks`) or a `Parent/Child` path matched against
+/// the header chain (first match in document order wins). Repeated inserts
+/// keep chronological order with single blank separators.
 pub fn insert_under(text: &str, header: &str, body: &str) -> anyhow::Result<String> {
     let want = header.trim();
-    let lines: Vec<&str> = text.lines().collect();
-    let position = lines.iter().position(|line| {
-        let trimmed = line.trim_start();
-        trimmed.starts_with('#') && trimmed.trim_start_matches('#').trim() == want
-    });
-    let Some(index) = position else {
+    if want.is_empty() {
+        return Err(ChoraError::NoteNoHeader(header.to_owned()).into());
+    }
+    let headers = read_headers(text);
+    let mut stack: Vec<usize> = Vec::new();
+    let mut target: Option<usize> = None;
+    for (index, current) in headers.iter().enumerate() {
+        while stack
+            .last()
+            .is_some_and(|&top| headers[top].level >= current.level)
+        {
+            stack.pop();
+        }
+        stack.push(index);
+        let chain = stack
+            .iter()
+            .map(|&top| headers[top].title.as_str())
+            .collect::<Vec<_>>()
+            .join("/");
+        if chain == want || chain.ends_with(&format!("/{want}")) {
+            target = Some(index);
+            break;
+        }
+    }
+    let Some(found) = target else {
         return Err(ChoraError::NoteNoHeader(header.to_owned()).into());
     };
+    let level = headers[found].level;
+    let lines: Vec<&str> = text.lines().collect();
+    let insert_at = headers
+        .iter()
+        .skip(found + 1)
+        .find(|next| next.level <= level)
+        .map(|next| next.line - 1)
+        .unwrap_or(lines.len());
     let mut out: Vec<&str> = Vec::with_capacity(lines.len() + body.lines().count() + 2);
-    out.extend_from_slice(&lines[..=index]);
-    out.push("");
-    for line in body.lines() {
-        out.push(line);
+    out.extend_from_slice(&lines[..insert_at]);
+    if !out.is_empty() && !out.last().is_some_and(|line| line.trim().is_empty()) {
+        out.push("");
     }
-    out.extend_from_slice(&lines[index + 1..]);
+    out.extend(body.lines());
+    if insert_at < lines.len() {
+        // The next line is a header: keep exactly one blank between.
+        if !lines[insert_at].trim().is_empty() {
+            out.push("");
+        }
+        out.extend_from_slice(&lines[insert_at..]);
+    }
     let mut text = out.join("\n");
     if !text.ends_with('\n') {
         text.push('\n');
@@ -241,6 +299,53 @@ fn file_view(
     }))
 }
 
+/// Resolve `--path` scopes under `dir` to a sorted, deduplicated file list.
+/// Empty scopes = whole dir. Each scope is a file or a subdir inside.
+pub fn collect_scoped(dir: &Path, scopes: &[String]) -> anyhow::Result<Vec<PathBuf>> {
+    if scopes.is_empty() {
+        return collect_md(dir);
+    }
+    let mut files = Vec::new();
+    for rel in scopes {
+        let scoped = join_safe(dir, rel)?;
+        if scoped.is_dir() {
+            files.extend(collect_md(&scoped)?);
+        } else if scoped.is_file() {
+            require_md(rel)?;
+            files.push(scoped);
+        } else {
+            return Err(ChoraError::NoteBadPath(format!("{rel}: not found")).into());
+        }
+    }
+    files.sort();
+    files.dedup();
+    Ok(files)
+}
+
+/// Views for `files` (absolute paths under `base`); `prefix` is prepended
+/// to display paths (`dirname` for dirs, empty for the notes root).
+fn file_views(
+    index: &Index,
+    base: &Path,
+    prefix: &str,
+    files: Vec<PathBuf>,
+    max: AccessLevel,
+    bodies: bool,
+) -> anyhow::Result<Vec<FileView>> {
+    let mut views = Vec::new();
+    for abs in &files {
+        let rel = if prefix.is_empty() {
+            rel_of(base, abs)
+        } else {
+            format!("{prefix}/{}", rel_of(base, abs))
+        };
+        if let Some(view) = file_view(index, &rel, abs, max, bodies)? {
+            views.push(view);
+        }
+    }
+    Ok(views)
+}
+
 /// View of one notes subdir (recursive). Errors on unknown dirname.
 pub fn dir_view(
     root: &Path,
@@ -248,6 +353,7 @@ pub fn dir_view(
     dirname: &str,
     max: AccessLevel,
     bodies: bool,
+    scopes: &[String],
 ) -> anyhow::Result<DirView> {
     let notes = root.join("notes");
     let dir = join_safe(&notes, dirname)?;
@@ -255,17 +361,44 @@ pub fn dir_view(
         return Err(ChoraError::NoteNoDir(dirname.to_owned()).into());
     }
     let (security, about) = (index.security_for(dirname), index.about_for(dirname));
-    let mut files = Vec::new();
-    for abs in collect_md(&dir)? {
-        let rel = format!("{dirname}/{}", rel_of(&dir, &abs));
-        if let Some(view) = file_view(index, &rel, &abs, max, bodies)? {
-            files.push(view);
-        }
-    }
+    let files = file_views(
+        index,
+        &dir,
+        dirname,
+        collect_scoped(&dir, scopes)?,
+        max,
+        bodies,
+    )?;
     Ok(DirView {
         dir: dirname.to_owned(),
         security,
         about: about.to_owned(),
+        files,
+    })
+}
+
+/// View of the notes root itself (`.` scope): subdirs and loose files.
+/// `scopes` are root-relative; empty scopes = everything with bodies.
+pub fn root_view(
+    root: &Path,
+    index: &Index,
+    max: AccessLevel,
+    bodies: bool,
+    scopes: &[String],
+) -> anyhow::Result<DirView> {
+    let notes = root.join("notes");
+    let files = file_views(
+        index,
+        &notes,
+        "",
+        collect_scoped(&notes, scopes)?,
+        max,
+        bodies,
+    )?;
+    Ok(DirView {
+        dir: String::from("."),
+        security: AccessLevel::Open,
+        about: String::from("notes root"),
         files,
     })
 }
@@ -524,11 +657,46 @@ mod tests {
     }
 
     #[test]
-    fn insert_under_places_body_after_header() {
+    fn insert_under_appends_at_section_end() {
         let text = "# T\n\n## A\nold\n\n## B\n";
         let out = insert_under(text, "A", "new\n").unwrap();
-        assert!(out.contains("## A\n\nnew\nold"));
-        assert!(out.contains("## B"));
+        assert_eq!(out, "# T\n\n## A\nold\n\nnew\n\n## B\n");
+    }
+
+    #[test]
+    fn insert_under_repeats_keep_order_without_blank_pileup() {
+        let text = "# T\n\n## A\nold\n\n## B\n";
+        let once = insert_under(text, "A", "one").unwrap();
+        let twice = insert_under(&once, "A", "two").unwrap();
+        assert_eq!(twice, "# T\n\n## A\nold\n\none\n\ntwo\n\n## B\n");
+    }
+
+    #[test]
+    fn insert_under_targets_duplicates_by_parent_child_path() {
+        let text = "# T\n## A\n### K\none\n## B\n### K\ntwo\n";
+        let out = insert_under(text, "B/K", "new").unwrap();
+        assert!(out.contains("### K\ntwo\n\nnew\n"), "{out}");
+        assert!(out.contains("### K\none\n## B"), "{out}");
+    }
+
+    #[test]
+    fn insert_under_ignores_tags_and_fenced_headers() {
+        let text = "# T\n#tag\n\n```sh\n# not a header\n```\n\n## Real\n";
+        assert!(insert_under(text, "tag", "x").is_err());
+        assert!(insert_under(text, "not a header", "x").is_err());
+        let out = insert_under(text, "Real", "x").unwrap();
+        assert!(out.contains("## Real\n\nx\n"), "{out}");
+    }
+
+    #[test]
+    fn headers_skip_fenced_code_blocks() {
+        let text =
+            "# Top\n\n```sh\n# fake\n## still fake\n```\n\n## Real\n\n~~~\n# also fake\n~~~\n";
+        let headers = read_headers(text);
+        assert_eq!(
+            headers.iter().map(|h| h.title.as_str()).collect::<Vec<_>>(),
+            vec!["Top", "Real"]
+        );
     }
 
     #[test]

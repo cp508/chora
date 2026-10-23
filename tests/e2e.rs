@@ -1740,6 +1740,174 @@ fn note_show_derives_about_from_h1_unless_index_sets_it() {
 }
 
 #[test]
+fn note_writes_refuse_targets_above_clearance() {
+    let env = setup();
+    assert!(cmd(&env).arg("init").output().unwrap().status.success());
+    let root = storage(&env);
+    write_index(&root, "## Notes\n\n### work\nsecurity: critical\n");
+    std::fs::create_dir_all(root.join("notes").join("work")).unwrap();
+
+    for action in ["add", "override"] {
+        let out = cmd_stdin(
+            &env,
+            &[
+                "--dir",
+                &root.to_string_lossy(),
+                "note",
+                action,
+                "work",
+                "--path",
+                "secret.md",
+            ],
+            "# x\n",
+        );
+        assert!(!out.status.success(), "{action}");
+        let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+        assert!(stderr.contains("critical"), "{stderr}");
+        assert!(!root.join("notes").join("work").join("secret.md").exists());
+    }
+
+    // Same clearance writes fine.
+    let out = cmd_stdin(
+        &env,
+        &[
+            "--dir",
+            &root.to_string_lossy(),
+            "--max-access",
+            "critical",
+            "note",
+            "override",
+            "work",
+            "--path",
+            "secret.md",
+        ],
+        "# x\n",
+    );
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(root.join("notes").join("work").join("secret.md").exists());
+}
+
+#[test]
+fn note_show_path_scopes_to_single_file_and_root_dot() {
+    let env = setup();
+    assert!(cmd(&env).arg("init").output().unwrap().status.success());
+    let root = storage(&env);
+    write_index(&root, "## Notes\n\n### docs\nsecurity: open\n");
+    std::fs::create_dir_all(root.join("notes").join("docs")).unwrap();
+    std::fs::write(root.join("notes").join("docs").join("a.md"), "# A\n").unwrap();
+    std::fs::write(root.join("notes").join("docs").join("b.md"), "# B\n").unwrap();
+    std::fs::write(root.join("notes").join("now.md"), "# Now\n").unwrap();
+
+    // One file out of the dir.
+    let out = cmd(&env)
+        .args([
+            "--dir",
+            &root.to_string_lossy(),
+            "note",
+            "show",
+            "docs",
+            "--path",
+            "a.md",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let parsed: serde_json::Value =
+        serde_json::from_str(&String::from_utf8_lossy(&out.stdout)).unwrap();
+    let paths: Vec<&str> = parsed["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["path"].as_str().unwrap())
+        .collect();
+    assert_eq!(paths, vec!["docs/a.md"]);
+
+    // Loose root file via `.`.
+    let out = cmd(&env)
+        .args([
+            "--dir",
+            &root.to_string_lossy(),
+            "note",
+            "show",
+            ".",
+            "--path",
+            "now.md",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(String::from_utf8_lossy(&out.stdout).contains("# Now"));
+
+    let out = cmd(&env)
+        .args([
+            "--dir",
+            &root.to_string_lossy(),
+            "note",
+            "headers",
+            ".",
+            "--path",
+            "now.md",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    assert!(String::from_utf8_lossy(&out.stdout).contains("now.md:\n  1: # Now"));
+
+    // Loose file write via `.` then read back.
+    let out = cmd_stdin(
+        &env,
+        &[
+            "--dir",
+            &root.to_string_lossy(),
+            "note",
+            "add",
+            ".",
+            "--path",
+            "loose.md",
+        ],
+        "# Loose\n",
+    );
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(root.join("notes").join("loose.md").exists());
+}
+
+#[test]
+fn note_show_bad_security_errors_loudly() {
+    let env = setup();
+    assert!(cmd(&env).arg("init").output().unwrap().status.success());
+    let root = storage(&env);
+    write_index(&root, "## Notes\n\n### docs\nsecurity: criticalaa\n");
+    std::fs::create_dir_all(root.join("notes").join("docs")).unwrap();
+    std::fs::write(root.join("notes").join("docs").join("main.md"), "# G\n").unwrap();
+
+    let out = cmd(&env)
+        .args(["--dir", &root.to_string_lossy(), "note", "show", "docs"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(stderr.contains("criticalaa"), "{stderr}");
+    assert!(stderr.contains("docs"), "{stderr}");
+}
+
+#[test]
 fn note_show_unknown_dir_errors_and_lists_all() {
     let env = setup();
     assert!(cmd(&env).arg("init").output().unwrap().status.success());

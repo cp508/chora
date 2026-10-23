@@ -30,7 +30,8 @@ Single user, one or two machines. Storage is a plain git repo (`~/chora` by defa
 - `### <dirname>` — top-level dir entry. `####`+ — children; deeper `#` = deeper path
   (`#### guides` + `##### install.md` under `### docs` = `docs/guides/install.md`).
 - Under each header: `security: open|restricted|critical`, `about: <text>`.
-- Missing entry = `open` + empty `about`. Bad `security` value = `open` + warning.
+- Missing entry = `open` + empty `about`. Bad `security` value = hard error.
+- Children without `security` inherit their parent's.
 - Effective level = longest-prefix match. Order: `open < restricted < critical`.
 - `about` never flows down (exact entry only); empty `about` falls back to
   the file's h1; explicit `about` in `index.md` wins.
@@ -38,9 +39,9 @@ Single user, one or two machines. Storage is a plain git repo (`~/chora` by defa
 ## Security
 
 - `--max-access <open|restricted|critical>` (global flag, default `restricted`):
-  read filter for `note show`, `note headers`, `chora index`.
-  `open` sees only `open`; `restricted` sees `open`+`restricted`; `critical` sees all.
-- Writes (`note add`, `note override`) are NOT gated. Events have no levels.
+  clearance for `note show`, `note headers`, `note add`, `note override`, `chora index`.
+  `open` sees/writes only `open`; `restricted` sees/writes `open`+`restricted`; `critical` sees/writes all.
+- Events have no levels.
 - `chora index` hides entries above clearance (warnings for hidden paths are hidden too).
 
 ## Dev workflow (mandatory)
