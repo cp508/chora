@@ -350,6 +350,9 @@ pub enum Cmd {
     /// Month calendar with event markers. Read-only.
     #[command(disable_help_flag = true)]
     Calendar,
+    /// Interactive TUI editor for all config settings.
+    #[command(disable_help_flag = true)]
+    Settings,
     /// Print shell completions to stdout.
     #[command(alias = "completions", disable_help_flag = true)]
     Completion {

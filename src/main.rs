@@ -39,6 +39,7 @@ fn main() -> anyhow::Result<()> {
     };
     match cmd {
         Cmd::Init => cmd_init(),
+        Cmd::Settings => cmd_settings(),
         Cmd::Completion { shell } => cmd_completion(shell),
         Cmd::Open { target } => {
             let (cfg, store) = load_store(cli.dir.as_deref(), true)?;
@@ -237,6 +238,17 @@ fn cmd_init() -> anyhow::Result<()> {
     println!("config: {}", ensured.path.display());
     println!("storage: {} (created on first use)", root.display());
     println!("Edit the config, then run any command.");
+    Ok(())
+}
+
+/// Interactive TUI editor for `config.toml`; creates the config first if missing.
+fn cmd_settings() -> anyhow::Result<()> {
+    Config::ensure_exists()?;
+    let cfg = Config::load()?;
+    if let Some(updated) = tui::run_settings(&cfg)? {
+        let path = updated.save()?;
+        println!("saved: {}", path.display());
+    }
     Ok(())
 }
 

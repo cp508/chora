@@ -131,7 +131,8 @@ fn defaults_table(defaults: &impl serde::Serialize) -> anyhow::Result<toml::Tabl
 }
 
 /// Comment for a key in the generated file.
-fn field_comment(key: &str) -> Option<&'static str> {
+#[must_use]
+pub fn field_comment(key: &str) -> Option<&'static str> {
     match key {
         "chora_dir" => Some("# Storage root. A leading ~/ expands to your home directory."),
         "editor" => Some(
@@ -190,33 +191,50 @@ fn next_table_offset(text: &str, section: &str) -> Option<usize> {
     None
 }
 
-/// Fresh file: header + commented keys.
-fn default_file_text() -> anyhow::Result<String> {
-    let mut out = String::from(
-        "# chora config. After upgrades, re-run `chora init`: missing keys\n# are appended at the bottom under `# NEW`, your values are kept.\n",
-    );
-    for (section, order, defaults) in [
-        ("main", &MAIN_ORDER[..], defaults_table(&Main::default())?),
-        (
-            "calendar",
-            &CALENDAR_ORDER[..],
-            defaults_table(&Calendar::default())?,
-        ),
-    ] {
-        out.push_str(&format!("[{section}]\n"));
-        for &key in order {
-            if let Some(value) = defaults.get(key) {
-                write_field(&mut out, key, value);
-            }
-        }
-    }
-    Ok(out)
-}
-
 impl Config {
     #[must_use]
     pub fn path() -> Option<PathBuf> {
         dirs::config_dir().map(|dir| dir.join("chora").join("config.toml"))
+    }
+
+    /// Render this config as a commented TOML file in canonical key order.
+    pub fn to_file_text(&self) -> anyhow::Result<String> {
+        let mut out = String::from(
+            "# chora config. After upgrades, re-run `chora init`: missing keys\n# are appended at the bottom under `# NEW`, your values are kept.\n",
+        );
+        for (section, order, table) in [
+            ("main", &MAIN_ORDER[..], defaults_table(&self.main)?),
+            (
+                "calendar",
+                &CALENDAR_ORDER[..],
+                defaults_table(&self.calendar)?,
+            ),
+        ] {
+            out.push_str(&format!("[{section}]\n"));
+            for &key in order {
+                if let Some(value) = table.get(key) {
+                    write_field(&mut out, key, value);
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Write this config to `~/.config/chora/config.toml`.
+    pub fn save(&self) -> anyhow::Result<PathBuf> {
+        let path = Self::path().context("failed to determine the config directory")?;
+        self.save_to(&path)?;
+        Ok(path)
+    }
+
+    /// Write this config to `path`, creating parent directories when missing.
+    pub fn save_to(&self, path: &Path) -> anyhow::Result<()> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create {}", parent.display()))?;
+        }
+        std::fs::write(path, self.to_file_text()?)
+            .with_context(|| format!("failed to write {}", path.display()))
     }
 
     /// The file must exist — `init` creates it.
@@ -252,13 +270,7 @@ impl Config {
 
     pub fn ensure_exists_at(path: &Path) -> anyhow::Result<Ensured> {
         if !path.exists() {
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent)
-                    .with_context(|| format!("failed to create {}", parent.display()))?;
-            }
-            let text = default_file_text()?;
-            std::fs::write(path, text)
-                .with_context(|| format!("failed to write {}", path.display()))?;
+            Self::default().save_to(path)?;
             return Ok(Ensured {
                 path: path.to_path_buf(),
                 added: Vec::new(),

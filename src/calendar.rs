@@ -108,29 +108,37 @@ pub fn load_marks(
     Ok(marks)
 }
 
+/// Terminal-palette color names in cycle order.
+pub const PALETTE: [(&str, Color); 16] = [
+    ("black", Color::Black),
+    ("red", Color::Red),
+    ("green", Color::Green),
+    ("yellow", Color::Yellow),
+    ("blue", Color::Blue),
+    ("magenta", Color::Magenta),
+    ("cyan", Color::Cyan),
+    ("white", Color::White),
+    ("gray", Color::Gray),
+    ("darkgray", Color::DarkGray),
+    ("lightred", Color::LightRed),
+    ("lightgreen", Color::LightGreen),
+    ("lightyellow", Color::LightYellow),
+    ("lightblue", Color::LightBlue),
+    ("lightmagenta", Color::LightMagenta),
+    ("lightcyan", Color::LightCyan),
+];
+
 /// Terminal-palette color names. No RGB: strictly terminal colors.
 pub fn parse_color(raw: &str) -> Result<Color, String> {
-    match raw.trim().to_lowercase().as_str() {
-        "black" => Ok(Color::Black),
-        "red" => Ok(Color::Red),
-        "green" => Ok(Color::Green),
-        "yellow" => Ok(Color::Yellow),
-        "blue" => Ok(Color::Blue),
-        "magenta" => Ok(Color::Magenta),
-        "cyan" => Ok(Color::Cyan),
-        "white" => Ok(Color::White),
-        "gray" => Ok(Color::Gray),
-        "darkgray" => Ok(Color::DarkGray),
-        "lightred" => Ok(Color::LightRed),
-        "lightgreen" => Ok(Color::LightGreen),
-        "lightyellow" => Ok(Color::LightYellow),
-        "lightblue" => Ok(Color::LightBlue),
-        "lightmagenta" => Ok(Color::LightMagenta),
-        "lightcyan" => Ok(Color::LightCyan),
-        _ => Err(format!(
-            "unknown color `{raw}`: expected black, red, green, yellow, blue, magenta, cyan, white, gray, darkgray, lightred, lightgreen, lightyellow, lightblue, lightmagenta, lightcyan"
-        )),
-    }
+    let lower = raw.trim().to_lowercase();
+    PALETTE
+        .iter()
+        .find(|(name, _)| *name == lower)
+        .map(|(_, color)| *color)
+        .ok_or_else(|| {
+            let names: Vec<&str> = PALETTE.iter().map(|(n, _)| *n).collect();
+            format!("unknown color `{raw}`: expected {}", names.join(", "))
+        })
 }
 
 /// Truncate to `width` chars (multibyte-safe).

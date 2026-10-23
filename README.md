@@ -37,6 +37,7 @@ Bare `chora` prints the whole tree.
 - `event [--confirm]` — TUI form for creating an event. With `--confirm`, opens the day file after submit.
 - `event show [--date <DATE>] [--json]` — show events: one day plus its repeatables with `--date`, all days in a row without. `--json` prints an array for scripts.
 - `calendar` — read-only month grid with event markers. Arrows/hjkl move, Enter opens the day, `t` jumps to today, `q` quits. Day-file events use `[calendar] day_color`, weekday repeatables use `repeat_color` (unless `show_repeat = false`).
+- `settings` — interactive TUI editor for all settings in `~/.config/chora/config.toml`.
 - `completion <bash|fish>` — print shell completions to stdout.
 
 `<DATE>` is `today`, `tomorrow`, `YYYY-MM-DD`, or `DD.MM.YYYY` (e.g. `20.05.2026`).
