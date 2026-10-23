@@ -1,8 +1,9 @@
 //! `index.md`: human-owned context + `security`/`about` per notes path.
 //!
-//! Soft parse: a missing entry means `open` + empty `about`;
-//! a bad `security` value means `open` plus a warning. Agents must never
-//! write this file (only `chora open index`, by a human).
+//! Mostly soft parse: a missing entry means `open` + empty `about`.
+//! A bad `security:` value is a hard error (fail-closed: a typo must not
+//! silently downgrade a note to `open`). Agents must never write this file
+//! (only `chora open index`, by a human).
 
 use std::path::Path;
 
@@ -84,9 +85,10 @@ impl Index {
         Self::default()
     }
 
-    /// Parse `index.md` text. Never fails: problems become warnings.
-    #[must_use]
-    pub fn parse(text: &str) -> Self {
+    /// Parse `index.md` text. Bad `security:` values are a hard error
+    /// (a typo must not silently downgrade a note to `open`); other
+    /// problems become warnings.
+    pub fn parse(text: &str) -> anyhow::Result<Self> {
         let mut index = Self::empty();
         let mut in_context = false;
         let mut in_notes = false;
@@ -139,11 +141,19 @@ impl Index {
                         continue;
                     }
                     stack.truncate(level - 4);
+                    // Children inherit the nearest ancestor's security unless
+                    // they set their own `security:` below.
+                    let parent = if stack.is_empty() {
+                        dir.clone()
+                    } else {
+                        format!("{dir}/{}", stack.join("/"))
+                    };
+                    let security = index.security_for(&parent);
                     stack.push(title.to_owned());
                     let path = format!("{dir}/{}", stack.join("/"));
                     index.entries.push(Entry {
                         path,
-                        security: AccessLevel::Open,
+                        security,
                         about: String::new(),
                     });
                     entry = Some(index.entries.len() - 1);
@@ -158,10 +168,9 @@ impl Index {
                         Some(level) => index.entries[idx].security = level,
                         None => {
                             let path = index.entries[idx].path.clone();
-                            index.warnings.push(Warning {
-                                path: Some(path),
-                                msg: format!("bad security `{value}`, treated as open"),
-                            });
+                            anyhow::bail!(
+                                "bad security `{value}` at `{path}`: expected open|restricted|critical"
+                            );
                         }
                     }
                 } else if let Some(value) = field(line.trim(), "about")
@@ -173,14 +182,14 @@ impl Index {
             }
         }
         index.context = context_lines.join("\n").trim().to_owned();
-        index
+        Ok(index)
     }
 
     /// Read `<root>/index.md`. Missing file = empty index, not an error.
     pub fn load(root: &Path) -> anyhow::Result<Self> {
         let path = root.join("index.md");
         match std::fs::read_to_string(&path) {
-            Ok(text) => Ok(Self::parse(&text)),
+            Ok(text) => Self::parse(&text),
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(Self::empty()),
             Err(err) => Err(err).with_context(|| format!("failed to read {}", path.display())),
         }
@@ -241,37 +250,47 @@ impl Index {
 mod tests {
     use super::*;
 
-    const SAMPLE: &str = "# Context\n\nAll project notes.\n\n## Notes\n\n### docs\nsecurity: restricted\nabout: Project docs\n\n#### guides\nsecurity: open\nabout: How-tos\n\n##### install.md\nabout: Install steps\n\n### secret\nsecurity: critical\nabout: Secrets\n\n### broken\nsecurity: nonsense\nabout: Bad level\n";
+    const SAMPLE: &str = "# Context\n\nAll project notes.\n\n## Notes\n\n### docs\nsecurity: restricted\nabout: Project docs\n\n#### guides\nsecurity: open\nabout: How-tos\n\n##### install.md\nabout: Install steps\n\n### secret\nsecurity: critical\nabout: Secrets\n";
 
     #[test]
     fn parses_context_and_entries() {
-        let index = Index::parse(SAMPLE);
+        let index = Index::parse(SAMPLE).unwrap();
         assert_eq!(index.context, "All project notes.");
         let paths: Vec<&str> = index.entries.iter().map(|e| e.path.as_str()).collect();
         assert_eq!(
             paths,
-            vec![
-                "docs",
-                "docs/guides",
-                "docs/guides/install.md",
-                "secret",
-                "broken"
-            ]
+            vec!["docs", "docs/guides", "docs/guides/install.md", "secret",]
         );
         assert_eq!(index.entries[0].security, AccessLevel::Restricted);
         assert_eq!(index.entries[0].about, "Project docs");
         assert_eq!(index.entries[1].security, AccessLevel::Open);
         assert_eq!(index.entries[2].security, AccessLevel::Open);
         assert_eq!(index.entries[2].about, "Install steps");
-        // Bad level falls back to open with a warning.
-        assert_eq!(index.entries[4].security, AccessLevel::Open);
-        assert_eq!(index.warnings.len(), 1);
-        assert_eq!(index.warnings[0].path.as_deref(), Some("broken"));
+        assert!(index.warnings.is_empty());
+    }
+
+    #[test]
+    fn children_inherit_parent_security_unless_set() {
+        let index = Index::parse(
+            "## Notes\n\n### work\nsecurity: critical\n\n#### sub.md\nabout: No level here\n\n#### open.md\nsecurity: open\n",
+        )
+        .unwrap();
+        assert_eq!(index.security_for("work/sub.md"), AccessLevel::Critical);
+        assert_eq!(index.security_for("work/open.md"), AccessLevel::Open);
+        assert_eq!(index.about_for("work/sub.md"), "No level here");
+    }
+
+    #[test]
+    fn bad_security_is_a_hard_error() {
+        let err = Index::parse("## Notes\n\n### broken\nsecurity: nonsense\n").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("broken"), "{msg}");
+        assert!(msg.contains("nonsense"), "{msg}");
     }
 
     #[test]
     fn security_prefers_longest_prefix_but_about_is_exact_only() {
-        let index = Index::parse(SAMPLE);
+        let index = Index::parse(SAMPLE).unwrap();
         assert_eq!(
             index.security_for("docs/guides/install.md"),
             AccessLevel::Open
@@ -287,7 +306,7 @@ mod tests {
 
     #[test]
     fn visibility_filters_by_clearance() {
-        let index = Index::parse(SAMPLE);
+        let index = Index::parse(SAMPLE).unwrap();
         let open: Vec<&str> = index
             .visible(AccessLevel::Open)
             .map(|e| e.path.as_str())
@@ -299,14 +318,13 @@ mod tests {
             .visible(AccessLevel::Critical)
             .map(|e| e.path.as_str())
             .collect();
-        assert_eq!(all.len(), 5);
-        // The `broken` warning resolves to open, so it shows even at open.
-        assert_eq!(index.visible_warnings(AccessLevel::Open).len(), 1);
+        assert_eq!(all.len(), 4);
+        assert!(index.visible_warnings(AccessLevel::Open).is_empty());
     }
 
     #[test]
     fn empty_text_is_empty_index() {
-        let index = Index::parse("");
+        let index = Index::parse("").unwrap();
         assert!(index.context.is_empty());
         assert!(index.entries.is_empty());
         assert_eq!(index.security_for("a/b.md"), AccessLevel::Open);
