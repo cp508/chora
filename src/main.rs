@@ -220,10 +220,10 @@ fn load_store(dir: Option<&Path>, bootstrap: bool) -> anyhow::Result<(Config, St
         // Empty dirs never block a checkout; files (`.gitignore`) would,
         // so the gitignore comes last, after the first fetch.
         store.ensure_layout()?;
-        if !git::is_repo(store.root()) {
+        if !git::is_repo(store.root())? {
             git::init_repo(store.root())?;
         }
-        if !cfg.main.remote_url.is_empty() && !git::has_remote(store.root()) {
+        if !cfg.main.remote_url.is_empty() && !git::has_remote(store.root())? {
             git::add_remote(store.root(), &cfg.main.remote_url)?;
         }
         // New device: fetch + checkout before `.gitignore` exists.
@@ -234,7 +234,7 @@ fn load_store(dir: Option<&Path>, bootstrap: bool) -> anyhow::Result<(Config, St
 }
 
 fn require_repo(store: &Store) -> anyhow::Result<()> {
-    if git::is_repo(store.root()) {
+    if git::is_repo(store.root())? {
         Ok(())
     } else {
         Err(ChoraError::NotARepo(store.root().to_path_buf()).into())
@@ -580,7 +580,7 @@ fn cmd_note_add(
     let (full, path) = note_file(store, dirname, rel)?;
     let index = Index::load(store.root())?;
     let need = index.security_for(&full);
-    if !need.allows(max) {
+    if !need.permits(max) {
         return Err(ChoraError::NoteDenied {
             path: full,
             need: need.as_str(),
@@ -636,7 +636,7 @@ fn cmd_note_override(
     let (full, path) = note_file(store, dirname, rel)?;
     let index = Index::load(store.root())?;
     let need = index.security_for(&full);
-    if !need.allows(max) {
+    if !need.permits(max) {
         return Err(ChoraError::NoteDenied {
             path: full,
             need: need.as_str(),
@@ -668,7 +668,7 @@ fn print_notes_bare(store: &Store, max: AccessLevel, json: bool) -> anyhow::Resu
     for dirname in note::top_dirs(&store.notes_dir())? {
         let view = note::dir_view(store.root(), &index, &dirname, max, false, &[])?;
         // A dir above clearance still shows when it holds visible files.
-        if view.security.allows(max) || !view.files.is_empty() {
+        if view.security.permits(max) || !view.files.is_empty() {
             dirs.push(view);
         }
     }
@@ -717,7 +717,7 @@ fn print_scoped_view(
 ) -> anyhow::Result<()> {
     let visible = view
         .as_ref()
-        .is_ok_and(|v| v.security.allows(max) || !v.files.is_empty());
+        .is_ok_and(|v| v.security.permits(max) || !v.files.is_empty());
     match view {
         Ok(view) if visible => {
             if json {
@@ -765,7 +765,7 @@ fn cmd_note_headers(
     let index = Index::load(store.root())?;
     let notes = store.notes_dir();
     let dir = if dirname == "." {
-        notes.clone()
+        notes
     } else {
         note::join_safe(&notes, dirname)?
     };
@@ -788,7 +788,7 @@ fn cmd_note_headers(
             format!("{dirname}/{}", note::rel_of(&dir, abs))
         };
         let security = index.security_for(&rel);
-        if !security.allows(max) {
+        if !security.permits(max) {
             continue;
         }
         let text = std::fs::read_to_string(abs)
@@ -830,7 +830,7 @@ fn cmd_index(store: &Store, json: bool, max: AccessLevel) -> anyhow::Result<()> 
         if extra
             .path
             .as_deref()
-            .is_some_and(|path| index.security_for(path).allows(max))
+            .is_some_and(|path| index.security_for(path).permits(max))
         {
             warnings.push(format!("{}: {}", extra.path.unwrap_or_default(), extra.msg));
         }

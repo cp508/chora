@@ -12,8 +12,7 @@ pub fn open(target: &Path, cwd: &Path, configured: &str) -> anyhow::Result<()> {
     } else {
         std::env::var("EDITOR").unwrap_or_default()
     };
-    let mut parts =
-        shell_words::split(&raw).map_err(|err| ChoraError::EditorSpawn(err.to_string()))?;
+    let mut parts = shell_words::split(&raw).map_err(ChoraError::EditorParse)?;
     if parts.is_empty() {
         return Err(ChoraError::EditorMissing.into());
     }
@@ -24,7 +23,10 @@ pub fn open(target: &Path, cwd: &Path, configured: &str) -> anyhow::Result<()> {
         .arg(target)
         .current_dir(cwd)
         .status()
-        .map_err(|err| ChoraError::EditorSpawn(format!("{program}: {err}")))?;
+        .map_err(|err| ChoraError::EditorSpawn {
+            program,
+            source: err,
+        })?;
     if status.success() {
         Ok(())
     } else {

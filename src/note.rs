@@ -3,6 +3,7 @@
 //! All user-supplied note paths go through [`join_safe`]: absolute paths
 //! and `..` never escape the storage root.
 
+use std::fmt::Write as _;
 use std::path::{Component, Path, PathBuf};
 
 use anyhow::Context;
@@ -45,8 +46,11 @@ pub fn require_md(rel: &str) -> anyhow::Result<()> {
 /// One `#`-header inside a note file (1-based line number).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MdHeader {
+    /// Header depth: 1 for `#`, 2 for `##`, and so on.
     pub level: usize,
+    /// Header text without the `#` markers.
     pub title: String,
+    /// 1-based line number inside the file.
     pub line: usize,
 }
 
@@ -211,18 +215,26 @@ pub fn insert_under(text: &str, header: &str, body: &str) -> anyhow::Result<Stri
 /// One note file with its effective metadata.
 #[derive(Debug, Clone)]
 pub struct FileView {
+    /// Root-relative path (`docs/main.md`, or `now.md` for loose files).
     pub path: String,
+    /// Effective security level for `path`.
     pub security: AccessLevel,
+    /// Explicit `about:` or the file's own h1, else empty.
     pub about: String,
+    /// Full body when requested, else empty.
     pub body: String,
 }
 
 /// One notes dir with its files (recursive).
 #[derive(Debug, Clone)]
 pub struct DirView {
+    /// Dir name (`docs`), `.` for the notes root, `(files)` for loose files.
     pub dir: String,
+    /// Effective security level for the dir itself.
     pub security: AccessLevel,
+    /// Explicit `about:` of the dir entry, else empty.
     pub about: String,
+    /// Visible files under the dir, recursive.
     pub files: Vec<FileView>,
 }
 
@@ -275,7 +287,7 @@ fn file_view(
     bodies: bool,
 ) -> anyhow::Result<Option<FileView>> {
     let (security, index_about) = (index.security_for(rel), index.about_for(rel));
-    if !security.allows(max) {
+    if !security.permits(max) {
         return Ok(None);
     }
     // Explicit index.md `about` wins; otherwise fall back to the file's own
@@ -332,7 +344,7 @@ fn file_views(
     max: AccessLevel,
     bodies: bool,
 ) -> anyhow::Result<Vec<FileView>> {
-    let mut views = Vec::new();
+    let mut views = Vec::with_capacity(files.len());
     for abs in &files {
         let rel = if prefix.is_empty() {
             rel_of(base, abs)
@@ -467,30 +479,33 @@ fn describe(about: &str) -> &str {
 pub fn render_bare(dirs: &[DirView], loose: &DirView) -> String {
     let mut out = String::new();
     for dir in dirs {
-        out.push_str(&format!(
-            "### {} [{}] - {}\n",
+        let _ = writeln!(
+            out,
+            "### {} [{}] - {}",
             dir.dir,
             dir.security.as_str(),
             describe(&dir.about)
-        ));
+        );
         for file in &dir.files {
-            out.push_str(&format!(
-                "  {} [{}] - {}\n",
+            let _ = writeln!(
+                out,
+                "  {} [{}] - {}",
                 file.path,
                 file.security.as_str(),
                 describe(&file.about)
-            ));
+            );
         }
     }
     if !loose.files.is_empty() {
-        out.push_str(&format!("### {} - {}\n", loose.dir, loose.about));
+        let _ = writeln!(out, "### {} - {}", loose.dir, loose.about);
         for file in &loose.files {
-            out.push_str(&format!(
-                "  {} [{}] - {}\n",
+            let _ = writeln!(
+                out,
+                "  {} [{}] - {}",
                 file.path,
                 file.security.as_str(),
                 describe(&file.about)
-            ));
+            );
         }
     }
     if out.is_empty() {
@@ -513,12 +528,13 @@ pub fn render_dir(dir: &DirView) -> String {
         return out;
     }
     for file in &dir.files {
-        out.push_str(&format!(
-            "\n### {} (security: {})\nabout: {}\n",
+        let _ = writeln!(
+            out,
+            "\n### {} (security: {})\nabout: {}",
             file.path,
             file.security.as_str(),
             describe(&file.about)
-        ));
+        );
         out.push_str(&file.body);
         if !file.body.ends_with('\n') {
             out.push('\n');
@@ -557,13 +573,14 @@ pub fn render_index(index: &Index, max: AccessLevel) -> String {
     let mut shown = false;
     for entry in index.visible(max) {
         let depth = entry.path.matches('/').count();
-        out.push_str(&format!(
-            "{} {} [{}] - {}\n",
+        let _ = writeln!(
+            out,
+            "{} {} [{}] - {}",
             "#".repeat(3 + depth),
             entry.path,
             entry.security.as_str(),
             describe(&entry.about)
-        ));
+        );
         shown = true;
     }
     if !shown {

@@ -25,14 +25,20 @@ use crate::tui::{centered, with_terminal};
 
 /// One of the 42 visible cells. `current` marks the shown month;
 /// border days from adjacent months render dimmed.
+#[derive(Debug, Clone, Copy)]
 pub struct Cell {
+    /// Cell date (may belong to an adjacent month).
     pub date: NaiveDate,
+    /// True when the date is inside the shown month.
     pub current: bool,
 }
 
 /// Event markers of a cell: first titles of each kind.
+#[derive(Debug, Clone)]
 pub struct DayMarks {
+    /// First event title recorded on that date, if any.
     pub day_title: Option<String>,
+    /// First weekday-repeatable title, if any.
     pub repeat_title: Option<String>,
 }
 
@@ -157,9 +163,13 @@ fn fit(text: &str, width: usize) -> String {
 }
 
 /// Display options, built once from `[calendar]` in `main`.
+#[derive(Debug, Clone)]
 pub struct Options {
+    /// Color for events recorded on that date.
     pub day_color: Color,
+    /// Color for weekday repeatables.
     pub repeat_color: Color,
+    /// Whether repeatables are marked on the calendar at all.
     pub show_repeat: bool,
     /// Fixed 6x3 cells (square on typical fonts) instead of full-width stretch.
     pub fixed_cells: bool,

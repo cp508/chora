@@ -5,6 +5,7 @@
 //! silently downgrade a note to `open`). Agents must never write this file
 //! (only `chora open index`, by a human).
 
+use std::fmt::Write as _;
 use std::path::Path;
 
 use anyhow::Context;
@@ -12,12 +13,16 @@ use anyhow::Context;
 /// Note visibility: `open < restricted < critical`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, clap::ValueEnum)]
 pub enum AccessLevel {
+    /// Visible to everyone, including the default clearance.
     Open,
+    /// Visible with `--max-access restricted` and above.
     Restricted,
+    /// Visible only with `--max-access critical`.
     Critical,
 }
 
 impl AccessLevel {
+    /// Lowercase level name for output and errors.
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
@@ -38,7 +43,7 @@ impl AccessLevel {
 
     /// Visible when the entry level fits the reader clearance.
     #[must_use]
-    pub fn allows(self, max: Self) -> bool {
+    pub fn permits(self, max: Self) -> bool {
         self <= max
     }
 }
@@ -46,22 +51,31 @@ impl AccessLevel {
 /// One parsed warning. `path` scopes it for `--max-access` filtering.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Warning {
+    /// Entry path the warning belongs to; `None` = file-wide.
     pub path: Option<String>,
+    /// Human-readable warning text.
     pub msg: String,
 }
 
 /// One `###`/`####`+ entry: `path` is `/`-joined (`docs/guides/install.md`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Entry {
+    /// `/`-joined note path (`docs` or `docs/guides/install.md`).
     pub path: String,
+    /// Effective level: explicit `security:` or inherited from the parent.
     pub security: AccessLevel,
+    /// Explicit `about:` text (never inherited from parents).
     pub about: String,
 }
 
+/// Parsed `index.md`: human context plus the notes tree.
 #[derive(Debug, Clone, Default)]
 pub struct Index {
+    /// Free-form `# Context` text (legacy placeholder line dropped).
     pub context: String,
+    /// Entries in file order.
     pub entries: Vec<Entry>,
+    /// Soft-parse warnings (bad `security:` is a hard error instead).
     pub warnings: Vec<Warning>,
 }
 
@@ -80,6 +94,7 @@ fn field<'a>(line: &'a str, key: &str) -> Option<&'a str> {
 }
 
 impl Index {
+    /// Empty index: no context, entries or warnings.
     #[must_use]
     pub fn empty() -> Self {
         Self::default()
@@ -88,6 +103,10 @@ impl Index {
     /// Parse `index.md` text. Bad `security:` values are a hard error
     /// (a typo must not silently downgrade a note to `open`); other
     /// problems become warnings.
+    ///
+    /// # Errors
+    ///
+    /// Fails on an unknown `security:` value at any entry.
     pub fn parse(text: &str) -> anyhow::Result<Self> {
         let mut index = Self::empty();
         let mut in_context = false;
@@ -126,7 +145,7 @@ impl Index {
                         entry = Some(index.entries.len() - 1);
                     }
                 } else if level >= 4 && in_notes {
-                    let Some(dir) = current.clone() else {
+                    let Some(dir) = current.as_ref() else {
                         index.warnings.push(Warning {
                             path: None,
                             msg: format!("orphan header `{title}`, skipped"),
@@ -135,7 +154,7 @@ impl Index {
                     };
                     if title.is_empty() {
                         index.warnings.push(Warning {
-                            path: Some(dir),
+                            path: current.clone(),
                             msg: String::from("empty header, skipped"),
                         });
                         continue;
@@ -238,7 +257,7 @@ impl Index {
 
     /// Entries visible under `max` clearance, in file order.
     pub fn visible(&self, max: AccessLevel) -> impl Iterator<Item = &Entry> {
-        self.entries.iter().filter(move |e| e.security.allows(max))
+        self.entries.iter().filter(move |e| e.security.permits(max))
     }
 
     /// Warnings visible under `max` clearance (path-less ones always show).
@@ -247,7 +266,7 @@ impl Index {
             .iter()
             .filter(|w| match &w.path {
                 None => true,
-                Some(path) => self.security_for(path).allows(max),
+                Some(path) => self.security_for(path).permits(max),
             })
             .collect()
     }
@@ -257,7 +276,7 @@ impl Index {
     pub fn skeleton(dirs: &[String]) -> String {
         let mut out = String::from("# Context\n\n## Notes\n");
         for dir in dirs {
-            out.push_str(&format!("\n### {dir}\nsecurity: open\nabout: \n"));
+            let _ = writeln!(out, "\n### {dir}\nsecurity: open\nabout: ");
         }
         out
     }

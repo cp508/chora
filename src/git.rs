@@ -57,13 +57,18 @@ fn remote_err(stderr: String) -> anyhow::Error {
     }
 }
 
-#[must_use]
-pub fn is_repo(dir: &Path) -> bool {
-    git(dir, &["rev-parse", "--git-dir"])
-        .map(|out| out.status.success())
-        .unwrap_or(false)
+/// True when `dir` is inside a git work tree.
+/// Fails only when `git` itself cannot run (missing binary, bad `PATH`);
+/// a non-repo or a failed check is `Ok(false)`.
+pub fn is_repo(dir: &Path) -> anyhow::Result<bool> {
+    Ok(git(dir, &["rev-parse", "--git-dir"])?.status.success())
 }
 
+/// Init a git repo in `dir` (quiet).
+///
+/// # Errors
+///
+/// Fails when `git` cannot run or `init` reports an error.
 pub fn init_repo(dir: &Path) -> anyhow::Result<()> {
     let out = git(dir, &["init", "-q"])?;
     if out.status.success() {
@@ -73,25 +78,27 @@ pub fn init_repo(dir: &Path) -> anyhow::Result<()> {
     }
 }
 
-#[must_use]
-pub fn has_remote(dir: &Path) -> bool {
-    git(dir, &["config", "remote.origin.url"])
-        .map(|out| out.status.success() && !out.stdout.is_empty())
-        .unwrap_or(false)
+/// True when `origin` remote is configured.
+/// Fails only when `git` itself cannot run; otherwise `Ok(false)`.
+pub fn has_remote(dir: &Path) -> anyhow::Result<bool> {
+    let out = git(dir, &["config", "remote.origin.url"])?;
+    Ok(out.status.success() && !out.stdout.is_empty())
 }
 
-#[must_use]
-pub fn has_head(dir: &Path) -> bool {
-    git(dir, &["rev-parse", "--verify", "HEAD"])
-        .map(|out| out.status.success())
-        .unwrap_or(false)
+/// True when `HEAD` resolves to a commit.
+/// Fails only when `git` itself cannot run; otherwise `Ok(false)`.
+pub fn has_head(dir: &Path) -> anyhow::Result<bool> {
+    Ok(git(dir, &["rev-parse", "--verify", "HEAD"])?
+        .status
+        .success())
 }
 
-#[must_use]
-pub fn has_upstream(dir: &Path) -> bool {
-    git(dir, &["rev-parse", "--verify", "@{u}"])
-        .map(|out| out.status.success())
-        .unwrap_or(false)
+/// True when the upstream (`@{u}`) resolves.
+/// Fails only when `git` itself cannot run; otherwise `Ok(false)`.
+pub fn has_upstream(dir: &Path) -> anyhow::Result<bool> {
+    Ok(git(dir, &["rev-parse", "--verify", "@{u}"])?
+        .status
+        .success())
 }
 
 /// Merge remote changes on top of a local exit commit.
@@ -112,7 +119,7 @@ pub fn pull_rebase(dir: &Path) -> anyhow::Result<()> {
 /// an untracked `.gitignore` would block the checkout even with identical
 /// content. No remote, no local HEAD needed, empty remote: all no-ops.
 pub fn ensure_from_remote(dir: &Path) -> anyhow::Result<()> {
-    if !has_remote(dir) || has_head(dir) {
+    if !has_remote(dir)? || has_head(dir)? {
         return Ok(());
     }
     let fetch = git(dir, &["fetch", "origin"])?;
@@ -169,6 +176,11 @@ fn default_remote_branch(dir: &Path) -> anyhow::Result<Option<String>> {
     Ok(first)
 }
 
+/// Attach `url` as `origin` of the repo in `dir`.
+///
+/// # Errors
+///
+/// Fails when `git` cannot run or `remote add` reports an error.
 pub fn add_remote(dir: &Path, url: &str) -> anyhow::Result<()> {
     let out = git(dir, &["remote", "add", "origin", url])?;
     if out.status.success() {
@@ -178,6 +190,11 @@ pub fn add_remote(dir: &Path, url: &str) -> anyhow::Result<()> {
     }
 }
 
+/// True when the work tree has uncommitted changes.
+///
+/// # Errors
+///
+/// Fails when `git` cannot run or `status` reports an error.
 pub fn is_dirty(dir: &Path) -> anyhow::Result<bool> {
     let out = git(dir, &["status", "--porcelain"])?;
     if out.status.success() {
@@ -187,6 +204,11 @@ pub fn is_dirty(dir: &Path) -> anyhow::Result<bool> {
     }
 }
 
+/// Stage everything (`git add -A`).
+///
+/// # Errors
+///
+/// Fails when `git` cannot run or `add` reports an error.
 pub fn add_all(dir: &Path) -> anyhow::Result<()> {
     let out = git(dir, &["add", "-A"])?;
     if out.status.success() {
@@ -211,7 +233,7 @@ pub fn commit(dir: &Path, message: &str) -> anyhow::Result<bool> {
 
 /// No remote = no-op. First push sets upstream.
 pub fn push(dir: &Path) -> anyhow::Result<()> {
-    if !has_remote(dir) {
+    if !has_remote(dir)? {
         return Ok(());
     }
     let out = git(dir, &["push", "-q", "-u", "origin", "HEAD"])?;

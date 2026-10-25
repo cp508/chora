@@ -1,12 +1,16 @@
 //! `~/.config/chora/config.toml`. No env vars; `--dir` overrides for one run.
 
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+/// Whole `config.toml`: storage plus calendar display.
 pub struct Config {
+    /// Storage, openers, sync policy and remote.
     pub main: Main,
     /// Missing `[calendar]` table falls back to defaults, key by key.
     #[serde(default)]
@@ -15,7 +19,7 @@ pub struct Config {
 
 /// Calendar display settings. Terminal palette only, no RGB.
 #[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct Calendar {
     /// Color for events recorded on that date.
     pub day_color: String,
@@ -58,6 +62,8 @@ pub enum OldEventPolicy {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+/// `[main]` table: storage root, openers, sync policy and remote.
 pub struct Main {
     /// `~/` expands to home.
     pub chora_dir: String,
@@ -92,7 +98,9 @@ impl Default for Main {
 }
 
 #[derive(Debug)]
+/// Paths from `init` plus keys appended under `# NEW`.
 pub struct Ensured {
+    /// Config file path that was created or migrated.
     pub path: PathBuf,
     /// Keys appended under `# NEW` (empty when nothing was missing).
     pub added: Vec<String>,
@@ -171,7 +179,7 @@ fn write_field(out: &mut String, key: &str, value: &toml::Value) {
         out.push_str(comment);
         out.push('\n');
     }
-    out.push_str(&format!("{key} = {value}\n"));
+    let _ = writeln!(out, "{key} = {value}");
 }
 
 /// Byte offset of the next `[table]` header after `[section]`, if any.
@@ -192,6 +200,7 @@ fn next_table_offset(text: &str, section: &str) -> Option<usize> {
 }
 
 impl Config {
+    /// Default config file location (`~/.config/chora/config.toml`).
     #[must_use]
     pub fn path() -> Option<PathBuf> {
         dirs::config_dir().map(|dir| dir.join("chora").join("config.toml"))
@@ -210,7 +219,7 @@ impl Config {
                 defaults_table(&self.calendar)?,
             ),
         ] {
-            out.push_str(&format!("[{section}]\n"));
+            let _ = writeln!(out, "[{section}]");
             for &key in order {
                 if let Some(value) = table.get(key) {
                     write_field(&mut out, key, value);
@@ -243,6 +252,13 @@ impl Config {
         Self::load_from(&path)
     }
 
+    /// Parse one config file. Unknown keys are a hard error (fail-closed:
+    /// a typo must not silently fall back to defaults).
+    ///
+    /// # Errors
+    ///
+    /// Fails when the file is missing, unreadable, or has invalid TOML,
+    /// unknown keys, or values of the wrong type.
     pub fn load_from(path: &Path) -> anyhow::Result<Self> {
         crate::debug_log!("config: {}", path.display());
         let text = match std::fs::read_to_string(path) {
@@ -268,6 +284,12 @@ impl Config {
         Self::ensure_exists_at(&path)
     }
 
+    /// Append missing keys under `# NEW` at `path`, creating the file first.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the file cannot be read or written (permissions, IO).
+    /// Broken TOML is left alone for `load_from` to report precisely.
     pub fn ensure_exists_at(path: &Path) -> anyhow::Result<Ensured> {
         if !path.exists() {
             Self::default().save_to(path)?;
@@ -312,7 +334,7 @@ impl Config {
                 added.push(format!("{prefix}{key}"));
             }
             if !table.contains_key(section) {
-                out.push_str(&format!("\n[{section}]\n{block}"));
+                let _ = write!(out, "\n[{section}]\n{block}");
             } else if let Some(pos) = next_table_offset(&out, section) {
                 out.insert_str(pos, &format!("{block}\n"));
             } else {
@@ -346,6 +368,7 @@ impl Config {
     }
 }
 
+/// Expand a leading `~/` to the home directory; other paths pass through.
 #[must_use]
 pub fn expand_tilde(raw: &str) -> PathBuf {
     if let Some(rest) = raw.strip_prefix("~/")
@@ -476,6 +499,24 @@ mod tests {
         )
         .unwrap();
         assert!(Config::load_from(&path).is_err());
+    }
+
+    #[test]
+    fn load_from_rejects_unknown_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        // Typo in `[main]`: must fail instead of silently using defaults.
+        std::fs::write(&path, "[main]\nchor_dir = \"/tmp/c\"\n").unwrap();
+        let err = Config::load_from(&path).unwrap_err();
+        assert!(err.to_string().contains("chor_dir"), "{err}");
+        // Unknown key inside `[calendar]`: same fail-closed rule.
+        std::fs::write(
+            &path,
+            "[main]\nchora_dir = \"/tmp/c\"\n[calendar]\nday_colour = \"red\"\n",
+        )
+        .unwrap();
+        let err = Config::load_from(&path).unwrap_err();
+        assert!(err.to_string().contains("day_colour"), "{err}");
     }
 
     #[test]

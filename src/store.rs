@@ -8,6 +8,8 @@ use chrono::NaiveDate;
 use crate::config::OldEventPolicy;
 use crate::event::Event;
 
+/// Storage root: `<root>/` holding `events/`, `notes/` and `index.md`.
+#[derive(Debug)]
 pub struct Store {
     root: PathBuf,
 }
@@ -15,26 +17,32 @@ pub struct Store {
 /// What a sweep of passed day files did.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct SweepReport {
+    /// Day files deleted under the `delete` policy.
     pub deleted: usize,
+    /// Day files moved to `events/backlog/` under the `backlog` policy.
     pub backlogged: usize,
 }
 
 impl Store {
+    /// Wrap an existing storage root (no IO).
     #[must_use]
-    pub fn new(root: PathBuf) -> Self {
-        Self { root }
+    pub fn new(root: impl Into<PathBuf>) -> Self {
+        Self { root: root.into() }
     }
 
+    /// The storage root itself.
     #[must_use]
     pub fn root(&self) -> &Path {
         &self.root
     }
 
+    /// `<root>/events`.
     #[must_use]
     pub fn events_dir(&self) -> PathBuf {
         self.root.join("events")
     }
 
+    /// `<root>/notes`.
     #[must_use]
     pub fn notes_dir(&self) -> PathBuf {
         self.root.join("notes")
@@ -60,6 +68,10 @@ impl Store {
     }
 
     /// Idempotent. Creates `events/` and `notes/` when missing.
+    ///
+    /// # Errors
+    ///
+    /// Fails when a directory cannot be created (permissions, IO).
     pub fn ensure_layout(&self) -> anyhow::Result<()> {
         for dir in [self.events_dir(), self.notes_dir()] {
             std::fs::create_dir_all(&dir)
@@ -69,6 +81,10 @@ impl Store {
     }
 
     /// Creates `.gitignore` unless the user has one.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the file cannot be written (permissions, IO).
     pub fn ensure_gitignore(&self) -> anyhow::Result<()> {
         let path = self.root.join(".gitignore");
         if !path.exists() {
@@ -82,6 +98,10 @@ impl Store {
     /// Only top-level `events/YYYY-MM-DD.md` files; anything else
     /// (notes, `backlog/`, stray files) is left alone. `Nothing` never
     /// even scans.
+    ///
+    /// # Errors
+    ///
+    /// Fails on IO errors while listing, deleting or moving day files.
     pub fn sweep_old_events(
         &self,
         policy: OldEventPolicy,
@@ -139,12 +159,17 @@ impl Store {
         Ok(report)
     }
 
+    /// Fresh day file contents: just the date header.
     #[must_use]
     pub fn day_template(date: NaiveDate) -> String {
         format!("# {}\n", date.format("%Y-%m-%d"))
     }
 
     /// Creates the day file from the template if missing.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the file or its parent cannot be created (permissions, IO).
     pub fn ensure_day_file(&self, date: NaiveDate) -> anyhow::Result<PathBuf> {
         let path = self.day_path(date);
         if !path.exists() {
@@ -159,6 +184,10 @@ impl Store {
     }
 
     /// A missing file is an empty day, not an error.
+    ///
+    /// # Errors
+    ///
+    /// Fails on IO errors other than "file not found".
     pub fn read_day(&self, date: NaiveDate) -> anyhow::Result<String> {
         let path = self.day_path(date);
         match std::fs::read_to_string(&path) {
@@ -170,6 +199,10 @@ impl Store {
 
     /// All days with a file, oldest first. Missing `events/` is empty.
     /// `backlog/` and `repeatable/` are not day files and never listed.
+    ///
+    /// # Errors
+    ///
+    /// Fails when `events/` cannot be listed (permissions, IO).
     pub fn list_days(&self) -> anyhow::Result<Vec<NaiveDate>> {
         let events = self.events_dir();
         if !events.is_dir() {
@@ -198,6 +231,10 @@ impl Store {
     /// Repeatable events for `date`: the `events/repeatable/<weekday>.md`
     /// file (e.g. `monday.md`), parsed with `date` as the event date.
     /// Missing file or dir is no repeatables, not an error.
+    ///
+    /// # Errors
+    ///
+    /// Fails on IO errors other than "file not found".
     pub fn read_repeatables(&self, date: NaiveDate) -> anyhow::Result<Vec<Event>> {
         let weekday = date.format("%A").to_string().to_lowercase();
         let path = self
@@ -212,6 +249,10 @@ impl Store {
     }
 
     /// Appends a section; creates the day file first.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the day file cannot be created, read or written.
     pub fn append_section(&self, date: NaiveDate, section: &str) -> anyhow::Result<()> {
         let path = self.ensure_day_file(date)?;
         let mut text = std::fs::read_to_string(&path)

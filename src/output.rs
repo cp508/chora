@@ -2,6 +2,7 @@
 
 use chrono::NaiveDate;
 use serde::Serialize;
+use std::fmt::Write as _;
 
 use crate::event::{Event, format_duration};
 
@@ -26,6 +27,8 @@ impl From<&Event> for EventJson {
     }
 }
 
+/// Human-readable day: `# DATE` plus one `## title — time (dur)` line
+/// per event, sorted by time.
 #[must_use]
 pub fn plaintext(date: NaiveDate, events: &[Event]) -> String {
     let mut out = format!("# {}\n", date.format("%Y-%m-%d"));
@@ -34,12 +37,13 @@ pub fn plaintext(date: NaiveDate, events: &[Event]) -> String {
         return out;
     }
     for event in events {
-        out.push_str(&format!(
-            "## {} — {} ({})\n",
+        let _ = writeln!(
+            out,
+            "## {} — {} ({})",
             event.title,
             event.time.format("%H:%M"),
             format_duration(event.duration)
-        ));
+        );
         if !event.context.is_empty() {
             out.push_str(&event.context);
             out.push('\n');

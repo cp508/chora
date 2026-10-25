@@ -522,10 +522,10 @@ fn render_input(
         .saturating_sub(inner_h.saturating_sub(1))
         .min(rows.len().saturating_sub(inner_h));
     let visible: Vec<Line> = rows
-        .iter()
+        .into_iter()
         .skip(offset)
         .take(inner_h)
-        .map(|row| Line::from(row.clone()))
+        .map(Line::from)
         .collect();
     let block = Block::default()
         .borders(Borders::ALL)
@@ -543,7 +543,7 @@ fn render_input(
 fn render_footer(frame: &mut ratatui::Frame<'_>, area: Rect, error: Option<&str>) {
     let mut lines = Vec::new();
     if let Some(error) = error {
-        lines.push(Line::from(error.to_owned()));
+        lines.push(Line::from(error));
     }
     lines.push(Line::from(
         "Tab, up/down: fields; Enter: create; Esc: cancel",

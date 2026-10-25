@@ -44,7 +44,11 @@ pub fn with_auto_commit_every(
     });
     let result = edit();
     drop(stop);
-    let _ = checkpoint.join();
+    // A panicking checkpoint is a bug: surface it instead of reporting
+    // success while the commit never happened.
+    if let Err(payload) = checkpoint.join() {
+        std::panic::resume_unwind(payload);
+    }
     result
 }
 
@@ -73,7 +77,7 @@ pub fn sync_after_open(store: &Store, message: &str) -> anyhow::Result<()> {
         // Virgin repo (no commits, no tracking): nothing to merge or push.
         // First edits have no upstream yet — `push` below sets it via `-u`.
         // Otherwise rebase the exit commit onto fresh remote work.
-        let synced = git::has_remote(store.root()) && git::has_upstream(store.root());
+        let synced = git::has_remote(store.root())? && git::has_upstream(store.root())?;
         if synced {
             git::pull_rebase(store.root())?;
         }

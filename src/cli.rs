@@ -3,6 +3,7 @@
 //! Help flags are disabled on purpose: bare `chora` prints the tree from
 //! [`render_help_tree`], built dynamically from the clap schema below.
 
+use std::fmt::Write as _;
 use std::path::PathBuf;
 
 use anyhow::Context;
@@ -233,15 +234,12 @@ fn help_text(colored: bool) -> String {
         out.push_str(&paint_row(colored, &row, style));
         out.push('\n');
     }
-    out.push_str(&format!(
-        "\n{}\n",
-        paint(colored, HEADER_STYLE, "Annotation:")
-    ));
+    let _ = writeln!(out, "\n{}", paint(colored, HEADER_STYLE, "Annotation:"));
     for line in ANNOTATION {
         out.push_str(&paint(colored, DIM_STYLE, line));
         out.push('\n');
     }
-    out.push_str(&format!("\n{}\n", paint(colored, HEADER_STYLE, "Options:")));
+    let _ = writeln!(out, "\n{}", paint(colored, HEADER_STYLE, "Options:"));
     for row in global_options() {
         out.push_str(&paint_row(colored, &row, ARG_STYLE));
         out.push('\n');
@@ -298,6 +296,7 @@ pub struct Cli {
     pub max_access: AccessLevel,
 
     #[command(subcommand)]
+    /// Chosen subcommand; `None` prints the help tree.
     pub cmd: Option<Cmd>,
 }
 
@@ -400,7 +399,9 @@ pub enum IndexAction {
 /// Shells with generated completions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum CompletionShell {
+    /// Bourne-again shell completions.
     Bash,
+    /// Friendly interactive shell completions.
     Fish,
 }
 
@@ -438,6 +439,7 @@ pub enum Cmd {
         /// Free-form body text for non-interactive creation.
         #[arg(long, value_name = "BODY")]
         body: Option<String>,
+        /// `show` displays events; empty runs the creation flow.
         #[command(subcommand)]
         action: Option<EventAction>,
     },
@@ -450,6 +452,7 @@ pub enum Cmd {
     /// Agent-readable notes: add/override/show/headers under `notes/`.
     #[command(disable_help_flag = true)]
     Note {
+        /// Notes action to run.
         #[command(subcommand)]
         action: NoteAction,
     },
@@ -459,6 +462,7 @@ pub enum Cmd {
         /// JSON object for scripts (`--max-access` still filters notes).
         #[arg(long)]
         json: bool,
+        /// `events` shows only the events guide; empty shows everything.
         #[command(subcommand)]
         action: Option<IndexAction>,
     },
@@ -513,7 +517,7 @@ fn skill_commands() -> Vec<String> {
             }
             let about = about_of(sub);
             if !about.is_empty() {
-                line.push_str(&format!(" — {about}"));
+                let _ = write!(line, " — {about}");
             }
             out.push(line);
             walk(sub, &path, out);
@@ -533,7 +537,7 @@ fn skill_commands() -> Vec<String> {
 }
 
 /// Short machine-readable usage for AI agents. Plain text, no colors.
-/// Command lines come from the clap schema (see [`skill_commands`]);
+/// Command lines come from the clap schema (see `skill_commands`);
 /// only the policy block below is static.
 #[must_use]
 pub fn render_skill_help() -> String {

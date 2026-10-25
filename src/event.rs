@@ -1,25 +1,35 @@
 //! Day events: `##` sections <-> [`Event`]. Lenient: sections without
 //! valid `Time:`/`Duration:` are day text, skipped without error.
 
+use std::fmt::Write as _;
 use std::time::Duration;
 
 use chrono::{NaiveDate, NaiveTime};
 
 use crate::error::ChoraError;
 
+/// One parsed day event: a `##` section with valid `Time:`/`Duration:`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Event {
     /// The `##` header (= TUI `name`).
     pub title: String,
+    /// The day this event belongs to (file date, or queried date for repeatables).
     pub date: NaiveDate,
+    /// Start time from `Time: HH:MM`.
     pub time: NaiveTime,
     /// Seconds, normalized by the parser.
     pub duration: Duration,
+    /// Free-form body text below the `Time:`/`Duration:` lines.
     pub context: String,
 }
 
 /// `30m`, `2h`, `1h30m`, `2h 20m` (spaces ignored), `2:00` (=2h),
 /// `1:30` (=1h30m), `1:02:03` (=1h2m3s). Groups run back to back, at least one.
+///
+/// # Errors
+///
+/// Returns [`ChoraError::BadDuration`] for empty input, unknown units,
+/// missing numbers, out-of-range minutes/seconds, or arithmetic overflow.
 pub fn parse_duration(raw: &str) -> Result<Duration, ChoraError> {
     let bad = || ChoraError::BadDuration(raw.to_owned());
     let text = raw.trim();
@@ -91,6 +101,10 @@ pub fn parse_duration(raw: &str) -> Result<Duration, ChoraError> {
 }
 
 /// `HH:MM` (`9:00`, `09:30`) or `H` (`9` = 09:00). Strict, no shorthands.
+///
+/// # Errors
+///
+/// Returns [`ChoraError::BadTime`] for anything outside `HH:MM` or a bare hour.
 pub fn parse_time_arg(raw: &str) -> Result<NaiveTime, ChoraError> {
     let bad = || ChoraError::BadTime(raw.to_owned());
     let text = raw.trim();
@@ -107,19 +121,20 @@ pub fn parse_time_arg(raw: &str) -> Result<NaiveTime, ChoraError> {
     Err(bad())
 }
 
+/// Compact duration text: `2h`, `1h30m`, `45m`, `10s` (`0s` for zero).
 #[must_use]
 pub fn format_duration(duration: Duration) -> String {
     let secs = duration.as_secs();
     let (hours, mins, secs) = (secs / 3600, (secs % 3600) / 60, secs % 60);
     let mut out = String::new();
     if hours > 0 {
-        out.push_str(&format!("{hours}h"));
+        let _ = write!(out, "{hours}h");
     }
     if mins > 0 {
-        out.push_str(&format!("{mins}m"));
+        let _ = write!(out, "{mins}m");
     }
     if secs > 0 || out.is_empty() {
-        out.push_str(&format!("{secs}s"));
+        let _ = write!(out, "{secs}s");
     }
     out
 }
@@ -138,9 +153,11 @@ pub fn snap_quarter(time: NaiveTime, forward: bool) -> NaiveTime {
     };
     let wrapped = next.rem_euclid(DAY);
     NaiveTime::from_hms_opt((wrapped / 60) as u32, (wrapped % 60) as u32, 0)
-        .expect("snapped time is in range")
+        .expect("BUG: rem_euclid(DAY) always yields a valid 00:00-23:59 time")
 }
 
+/// All valid events of a day file, sorted by time. Sections without
+/// valid `Time:`/`Duration:` are day text and skipped, never an error.
 #[must_use]
 pub fn parse_day(date: NaiveDate, text: &str) -> Vec<Event> {
     let mut events = Vec::new();
@@ -192,17 +209,30 @@ fn push_section(events: &mut Vec<Event>, date: NaiveDate, title: &str, body: &[&
             date,
             time,
             duration,
-            context: context.join("\n").trim().to_owned(),
+            // One allocation: trim the edges in place instead of
+            // `join().trim().to_owned()`, which copies the whole body twice.
+            context: trim_edges(context.join("\n")),
         });
     }
 }
 
+/// Trim leading/trailing whitespace in place (same result as
+/// `str::trim`, without copying the body).
+fn trim_edges(mut text: String) -> String {
+    let start = text.len() - text.trim_start().len();
+    text.drain(..start);
+    let end = text.trim_end().len();
+    text.truncate(end);
+    text
+}
+
+/// Render one event back to day-file section format.
 #[must_use]
 pub fn render_section(event: &Event) -> String {
     let mut out = String::from("## ");
     out.push_str(&event.title);
-    out.push_str(&format!("\nTime: {}\n", event.time.format("%H:%M")));
-    out.push_str(&format!("Duration: {}\n", format_duration(event.duration)));
+    let _ = writeln!(out, "\nTime: {}", event.time.format("%H:%M"));
+    let _ = writeln!(out, "Duration: {}", format_duration(event.duration));
     if event.context.is_empty() {
         out.push('\n');
     } else {
