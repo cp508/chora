@@ -5,6 +5,9 @@ edition = "2024"
 rust-version = "1.99"
 description = "Lightweight CLI organizer: markdown notes, day events, git sync"
 license = "MIT"
+repository = "https://gitlab.com/gidrex/chora"
+homepage = "https://gitlab.com/gidrex/chora"
+documentation = "https://docs.rs/chora"
 
 [[bin]]
 name = "chora"
