@@ -7,10 +7,14 @@
 //! `repeat_color` (a day with both shows the day event). Arrows/hjkl move
 //! the selection across month borders, `t` jumps to today, `q`/`Esc` quit.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(feature = "cli")]
+use std::path::PathBuf;
 
 use chrono::{Datelike, NaiveDate};
+#[cfg(feature = "cli")]
 use crossterm::event::{self, Event as CrosstermEvent, KeyCode, KeyEvent, KeyModifiers};
+#[cfg(feature = "cli")]
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout},
     style::{Color, Style},
@@ -18,9 +22,11 @@ use ratatui::{
     widgets::Paragraph,
 };
 
+#[cfg(feature = "cli")]
 use crate::cli::today;
 use crate::event::parse_day;
 use crate::store::Store;
+#[cfg(feature = "cli")]
 use crate::tui::{centered, with_terminal};
 
 /// One of the 42 visible cells. `current` marks the shown month;
@@ -115,6 +121,7 @@ pub fn load_marks(
 }
 
 /// Terminal-palette color names in cycle order.
+#[cfg(feature = "cli")]
 pub const PALETTE: [(&str, Color); 16] = [
     ("black", Color::Black),
     ("red", Color::Red),
@@ -135,6 +142,7 @@ pub const PALETTE: [(&str, Color); 16] = [
 ];
 
 /// Terminal-palette color names. No RGB: strictly terminal colors.
+#[cfg(feature = "cli")]
 pub fn parse_color(raw: &str) -> Result<Color, String> {
     let lower = raw.trim().to_lowercase();
     PALETTE
@@ -148,6 +156,7 @@ pub fn parse_color(raw: &str) -> Result<Color, String> {
 }
 
 /// Truncate to `width` chars (multibyte-safe).
+#[cfg(feature = "cli")]
 fn fit(text: &str, width: usize) -> String {
     if width == 0 {
         return String::new();
@@ -163,6 +172,7 @@ fn fit(text: &str, width: usize) -> String {
 }
 
 /// Display options, built once from `[calendar]` in `main`.
+#[cfg(feature = "cli")]
 #[derive(Debug, Clone)]
 pub struct Options {
     /// Color for events recorded on that date.
@@ -179,6 +189,7 @@ pub struct Options {
     pub show_today: bool,
 }
 
+#[cfg(feature = "cli")]
 struct App {
     root: PathBuf,
     year: i32,
@@ -192,6 +203,7 @@ struct App {
     done: bool,
 }
 
+#[cfg(feature = "cli")]
 impl App {
     fn new(root: &Path, options: Options) -> anyhow::Result<Self> {
         let selected = today();
@@ -272,6 +284,7 @@ impl App {
 /// Run the calendar. Read-only: no commits, no network. The terminal is
 /// restored on every exit path. Returns the date to open when `Enter`
 /// was pressed (`None` on quit).
+#[cfg(feature = "cli")]
 pub fn run(root: &Path, options: Options) -> anyhow::Result<Option<NaiveDate>> {
     let mut app = App::new(root, options)?;
     with_terminal(|terminal| {
@@ -288,18 +301,24 @@ pub fn run(root: &Path, options: Options) -> anyhow::Result<Option<NaiveDate>> {
     })
 }
 
+#[cfg(feature = "cli")]
 const WEEKDAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
 /// Fixed cells are 6 wide and 3 tall: terminal glyphs are about twice
 /// as tall as wide, so 6x3 reads as a square.
+#[cfg(feature = "cli")]
 const FIXED_CELL_WIDTH: u16 = 6;
+#[cfg(feature = "cli")]
 const FIXED_CELL_HEIGHT: u16 = 3;
 /// Seven cells plus six 1-wide separators; six rows plus five 1-tall ones.
+#[cfg(feature = "cli")]
 const FIXED_GRID_WIDTH: u16 = 7 * FIXED_CELL_WIDTH + 6;
+#[cfg(feature = "cli")]
 const FIXED_GRID_HEIGHT: u16 = 6 * FIXED_CELL_HEIGHT + 5;
 
 /// Today hint for the header row: `None` on the `NONE` header, on today
 /// itself, or when `show_today` is off.
+#[cfg(feature = "cli")]
 fn today_hint(app: &App) -> Option<String> {
     if app.options.header.trim().eq_ignore_ascii_case("none") {
         return None;
@@ -309,6 +328,7 @@ fn today_hint(app: &App) -> Option<String> {
 }
 
 /// Top row: selected date left, today hint right (only on other dates).
+#[cfg(feature = "cli")]
 fn render_header(frame: &mut ratatui::Frame<'_>, app: &App, area: ratatui::layout::Rect) {
     let header_left = Paragraph::new(Line::from(Span::raw(
         app.selected.format(&app.options.header).to_string(),
@@ -333,6 +353,7 @@ fn render_header(frame: &mut ratatui::Frame<'_>, app: &App, area: ratatui::layou
     }
 }
 
+#[cfg(feature = "cli")]
 fn render(frame: &mut ratatui::Frame<'_>, app: &App) {
     let area = frame.area();
     let fixed = app.options.fixed_cells;
@@ -444,6 +465,7 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &App) {
     frame.render_widget(footer, rows[4]);
 }
 
+#[cfg(feature = "cli")]
 fn render_row(
     frame: &mut ratatui::Frame<'_>,
     area: ratatui::layout::Rect,
@@ -466,6 +488,7 @@ fn render_row(
 }
 
 /// Seven cells with 1-wide separators, no trailing separator.
+#[cfg(feature = "cli")]
 fn week_columns(area: ratatui::layout::Rect, fixed: bool) -> std::rc::Rc<[ratatui::layout::Rect]> {
     let mut constraints = Vec::with_capacity(13);
     for _ in 0..7 {
@@ -486,6 +509,7 @@ fn week_columns(area: ratatui::layout::Rect, fixed: bool) -> std::rc::Rc<[ratatu
 /// Explicit grid lines, drawn after the cells: full-height `│` separators
 /// first, then full-width `─` separators with `┼` crossings on top.
 /// No outer frame — only the lines between cells.
+#[cfg(feature = "cli")]
 fn draw_grid(
     frame: &mut ratatui::Frame<'_>,
     weeks: ratatui::layout::Rect,
@@ -514,6 +538,7 @@ fn draw_grid(
 }
 
 /// One grid cell: title above the number, no borders of its own.
+#[cfg(feature = "cli")]
 fn cell_widget<'a>(app: &App, index: usize, width: u16) -> Paragraph<'a> {
     let cell = &app.cells[index];
     let marks = &app.marks[index];
@@ -551,6 +576,7 @@ fn cell_widget<'a>(app: &App, index: usize, width: u16) -> Paragraph<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "cli")]
     use ratatui::Terminal;
     use std::path::PathBuf;
 
@@ -659,6 +685,7 @@ mod tests {
         assert_eq!(day.title(), Some("Demo Day"));
     }
 
+    #[cfg(feature = "cli")]
     #[test]
     fn parse_color_accepts_terminal_palette() {
         for (raw, expected) in [
@@ -673,6 +700,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "cli")]
     #[test]
     fn parse_color_rejects_rgb_and_garbage() {
         for raw in ["", "#ff0000", "chartreuse", "rgb(1,2,3)"] {
@@ -680,6 +708,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "cli")]
     #[test]
     fn fit_truncates_multibyte_safely() {
         assert_eq!(fit("Standup", 4), "Stan");
@@ -688,6 +717,7 @@ mod tests {
         assert_eq!(fit("anything", 0), "");
     }
 
+    #[cfg(feature = "cli")]
     fn test_options() -> Options {
         Options {
             day_color: Color::Green,
@@ -719,6 +749,7 @@ mod tests {
         (tmp, root)
     }
 
+    #[cfg(feature = "cli")]
     #[test]
     fn selection_moves_across_month_border() {
         let (_tmp, root) = seeded_root();
@@ -734,6 +765,7 @@ mod tests {
         assert!(app.done);
     }
 
+    #[cfg(feature = "cli")]
     #[test]
     fn enter_requests_the_selected_day() {
         let (_tmp, root) = seeded_root();
@@ -744,6 +776,7 @@ mod tests {
         assert_eq!(app.open_requested, Some(date(2026, 10, 7)));
     }
 
+    #[cfg(feature = "cli")]
     #[test]
     fn quit_requests_nothing() {
         let (_tmp, root) = seeded_root();
@@ -759,6 +792,7 @@ mod tests {
         assert_eq!(app.open_requested, None);
     }
 
+    #[cfg(feature = "cli")]
     fn screen_text(terminal: &ratatui::Terminal<ratatui::backend::TestBackend>) -> String {
         terminal
             .backend()
@@ -769,6 +803,7 @@ mod tests {
             .collect::<String>()
     }
 
+    #[cfg(feature = "cli")]
     #[test]
     fn render_shows_titles_numbers_and_month() {
         use ratatui::backend::TestBackend;
@@ -805,6 +840,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "cli")]
     #[test]
     fn render_warns_on_tiny_terminal() {
         use ratatui::backend::TestBackend;
@@ -818,6 +854,7 @@ mod tests {
         assert!(screen_text(&terminal).contains("too small"));
     }
 
+    #[cfg(feature = "cli")]
     #[test]
     fn render_marks_day_cells_with_day_color() {
         use ratatui::backend::TestBackend;
@@ -841,6 +878,7 @@ mod tests {
         assert!(green_title, "day event title must use the day color");
     }
 
+    #[cfg(feature = "cli")]
     #[test]
     fn render_fixed_cells_form_a_centered_grid() {
         use ratatui::backend::TestBackend;
@@ -883,6 +921,7 @@ mod tests {
         assert_eq!(buffer[(40, 8)].symbol(), "7");
     }
 
+    #[cfg(feature = "cli")]
     #[test]
     fn header_shows_today_hint_only_on_other_dates() {
         use ratatui::backend::TestBackend;
@@ -906,6 +945,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "cli")]
     #[test]
     fn today_hint_logic() {
         let (_tmp, root) = seeded_root();
@@ -929,6 +969,7 @@ mod tests {
         assert_eq!(today_hint(&app), None);
     }
 
+    #[cfg(feature = "cli")]
     #[test]
     fn none_header_renders_empty_row() {
         use ratatui::backend::TestBackend;
@@ -949,6 +990,7 @@ mod tests {
         assert!(!text.contains("10.10.2026"));
     }
 
+    #[cfg(feature = "cli")]
     #[test]
     fn header_uses_custom_format() {
         use ratatui::backend::TestBackend;

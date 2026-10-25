@@ -163,14 +163,11 @@ pub fn parse_day(date: NaiveDate, text: &str) -> Vec<Event> {
     let mut events = Vec::new();
     let mut current: Option<(String, Vec<&str>)> = None;
     for line in text.lines() {
-        if let Some(title) = line
-            .strip_prefix("##")
-            .filter(|rest| !rest.starts_with('#'))
-        {
+        if let Some(title) = section_title(line) {
             if let Some((prev_title, prev_body)) = current.take() {
                 push_section(&mut events, date, &prev_title, &prev_body);
             }
-            current = Some((title.trim().to_owned(), Vec::new()));
+            current = Some((title.to_owned(), Vec::new()));
         } else if let Some((_, body)) = current.as_mut() {
             body.push(line);
         }
@@ -182,9 +179,11 @@ pub fn parse_day(date: NaiveDate, text: &str) -> Vec<Event> {
     events
 }
 
-fn push_section(events: &mut Vec<Event>, date: NaiveDate, title: &str, body: &[&str]) {
+/// Parse one `##` section body into an [`Event`]. `None` for plain day
+/// text (empty title or missing/invalid `Time:`/`Duration:`), never an error.
+fn parse_section(date: NaiveDate, title: &str, body: &[&str]) -> Option<Event> {
     if title.is_empty() {
-        return;
+        return None;
     }
     let mut time: Option<NaiveTime> = None;
     let mut duration: Option<Duration> = None;
@@ -203,16 +202,21 @@ fn push_section(events: &mut Vec<Event>, date: NaiveDate, title: &str, body: &[&
             context.push(line);
         }
     }
-    if let (Some(time), Some(duration)) = (time, duration) {
-        events.push(Event {
-            title: title.to_owned(),
-            date,
-            time,
-            duration,
-            // One allocation: trim the edges in place instead of
-            // `join().trim().to_owned()`, which copies the whole body twice.
-            context: trim_edges(context.join("\n")),
-        });
+    let (time, duration) = (time?, duration?);
+    Some(Event {
+        title: title.to_owned(),
+        date,
+        time,
+        duration,
+        // One allocation: trim the edges in place instead of
+        // `join().trim().to_owned()`, which copies the whole body twice.
+        context: trim_edges(context.join("\n")),
+    })
+}
+
+fn push_section(events: &mut Vec<Event>, date: NaiveDate, title: &str, body: &[&str]) {
+    if let Some(event) = parse_section(date, title, body) {
+        events.push(event);
     }
 }
 
@@ -241,6 +245,96 @@ pub fn render_section(event: &Event) -> String {
         out.push('\n');
     }
     out
+}
+
+/// Replace the `index`-th valid event section (0-based, in file order before
+/// time sorting, or matched by [`parse_day`] order) in `day_text` with `updated`.
+/// Preserves the `# YYYY-MM-DD` header, plain-text `##` sections, and other events.
+///
+/// # Errors
+///
+/// Fails when `index` is out of bounds for the valid events in `day_text`.
+pub fn replace_section(day_text: &str, index: usize, updated: &Event) -> anyhow::Result<String> {
+    rewrite_event_section(day_text, index, Some(updated))
+}
+
+/// Remove the `index`-th valid event section (0-based, in [`parse_day`] order)
+/// from `day_text`, keeping all other sections and plain day notes intact.
+///
+/// # Errors
+///
+/// Fails when `index` is out of bounds for the valid events in `day_text`.
+pub fn remove_section(day_text: &str, index: usize) -> anyhow::Result<String> {
+    rewrite_event_section(day_text, index, None)
+}
+
+fn section_title(line: &str) -> Option<&str> {
+    line.strip_prefix("##")
+        .filter(|rest| !rest.starts_with('#'))
+        .map(str::trim)
+}
+
+fn is_section_header(line: &str) -> bool {
+    section_title(line).is_some()
+}
+
+fn rewrite_event_section(
+    day_text: &str,
+    index: usize,
+    replacement: Option<&Event>,
+) -> anyhow::Result<String> {
+    let lines: Vec<&str> = day_text.lines().collect();
+    let first = lines.iter().position(|line| is_section_header(line));
+    let (preamble, rest) = match first {
+        Some(i) => (&lines[..i], &lines[i..]),
+        None => (&lines[..], &[][..]),
+    };
+    let mut blocks: Vec<Vec<&str>> = Vec::new();
+    for line in rest {
+        if is_section_header(line) {
+            blocks.push(vec![*line]);
+        } else if let Some(last) = blocks.last_mut() {
+            last.push(*line);
+        }
+    }
+    let mut valid: Vec<(NaiveTime, usize)> = Vec::new();
+    // Only the start time orders the UI index; the date is irrelevant here.
+    let dummy = NaiveDate::from_ymd_opt(2000, 1, 1).expect("fixed dummy date is valid");
+    for (idx, block) in blocks.iter().enumerate() {
+        let title = section_title(block[0]).unwrap_or_default();
+        if let Some(event) = parse_section(dummy, title, &block[1..]) {
+            valid.push((event.time, idx));
+        }
+    }
+    valid.sort_by_key(|(time, _)| *time);
+    let target = valid
+        .get(index)
+        .map(|(_, idx)| *idx)
+        .ok_or_else(|| anyhow::anyhow!("event index {index} out of bounds"))?;
+    let preamble_text = preamble.join("\n").trim().to_owned();
+    let mut rendered: Vec<String> = Vec::with_capacity(blocks.len());
+    for (idx, block) in blocks.iter().enumerate() {
+        if idx == target {
+            if let Some(ev) = replacement {
+                rendered.push(render_section(ev).trim().to_owned());
+            }
+        } else {
+            let mut end = block.len();
+            while end > 0 && block[end - 1].trim().is_empty() {
+                end -= 1;
+            }
+            rendered.push(block[..end].join("\n"));
+        }
+    }
+    let mut out = if preamble_text.is_empty() {
+        rendered.join("\n\n")
+    } else if rendered.is_empty() {
+        preamble_text
+    } else {
+        format!("{preamble_text}\n\n{}", rendered.join("\n\n"))
+    };
+    out.push('\n');
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -416,5 +510,47 @@ mod tests {
                 "{h}:{m} {forward}"
             );
         }
+    }
+
+    #[test]
+    fn replace_section_updates_target_in_sorted_order_and_keeps_notes() {
+        let text = "# 2026-11-20\n\n## Note\nhello\n\n## Late\nTime: 18:00\nDuration: 1h\n\nLate body.\n\n## Early\nTime: 09:00\nDuration: 30m\n\nEarly body.\n";
+        let events = parse_day(date(), text);
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].title, "Early");
+        assert_eq!(events[1].title, "Late");
+        let updated = Event {
+            title: String::from("Early updated"),
+            date: date(),
+            time: NaiveTime::from_hms_opt(9, 0, 0).unwrap(),
+            duration: Duration::from_secs(1800),
+            context: String::from("New body."),
+        };
+        let out = replace_section(text, 0, &updated).unwrap();
+        assert!(out.contains("# 2026-11-20"), "{out}");
+        assert!(out.contains("## Note"), "{out}");
+        assert!(out.contains("hello"), "{out}");
+        assert!(out.contains("## Late"), "{out}");
+        assert!(out.contains("Time: 18:00"), "{out}");
+        assert!(out.contains("## Early updated"), "{out}");
+        assert!(!out.contains("## Early\n"), "{out}");
+        let reparsed = parse_day(date(), &out);
+        assert_eq!(reparsed.len(), 2);
+        assert_eq!(reparsed[0].title, "Early updated");
+        assert_eq!(reparsed[0].context, "New body.");
+        assert_eq!(reparsed[1].title, "Late");
+    }
+
+    #[test]
+    fn remove_section_deletes_only_target_event() {
+        let text = "# 2026-11-20\n\n## Note\nhello\n\n## Late\nTime: 18:00\nDuration: 1h\n\n## Early\nTime: 09:00\nDuration: 30m\n";
+        let out = remove_section(text, 1).unwrap();
+        assert!(out.contains("## Note"), "{out}");
+        assert!(out.contains("## Early"), "{out}");
+        assert!(!out.contains("## Late"), "{out}");
+        let reparsed = parse_day(date(), &out);
+        assert_eq!(reparsed.len(), 1);
+        assert_eq!(reparsed[0].title, "Early");
+        assert!(remove_section(text, 2).is_err());
     }
 }

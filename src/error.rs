@@ -51,6 +51,7 @@ pub enum ChoraError {
     EditorMissing,
 
     /// The editor command failed to parse or to launch.
+    #[cfg(feature = "cli")]
     #[error("failed to parse editor command: {0}")]
     EditorParse(#[from] shell_words::ParseError),
 

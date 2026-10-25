@@ -60,6 +60,57 @@ impl Store {
         self.events_dir().join("backlog")
     }
 
+    /// `<root>/to-agent`: tasks delegated from mobile Capture to a PC agent.
+    #[must_use]
+    pub fn to_agent_dir(&self) -> PathBuf {
+        self.root.join("to-agent")
+    }
+
+    /// Write a delegated task file into `<root>/to-agent/YYYY-MM-DD-<slug>.md`.
+    /// Creates `to-agent/` lazily if missing. Appends `-2`, `-3`, ... on name collision.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the directory or task file cannot be created or written.
+    pub fn write_agent_task(
+        &self,
+        date: NaiveDate,
+        title: &str,
+        priority: &str,
+        project: Option<&str>,
+        body: &str,
+    ) -> anyhow::Result<PathBuf> {
+        let dir = self.to_agent_dir();
+        std::fs::create_dir_all(&dir)
+            .with_context(|| format!("failed to create {}", dir.display()))?;
+        let slug = slugify(title);
+        let date_str = date.format("%Y-%m-%d");
+        let mut path = dir.join(format!("{date_str}-{slug}.md"));
+        let mut counter = 2usize;
+        while path.exists() {
+            path = dir.join(format!("{date_str}-{slug}-{counter}.md"));
+            counter += 1;
+        }
+        let project_str = project
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("none");
+        let mut text = format!(
+            "# {}\nDate: {date_str}\nPriority: {}\nProject: {project_str}\n",
+            title.trim(),
+            priority.trim()
+        );
+        let trimmed_body = body.trim();
+        if !trimmed_body.is_empty() {
+            text.push('\n');
+            text.push_str(trimmed_body);
+            text.push('\n');
+        }
+        std::fs::write(&path, text)
+            .with_context(|| format!("failed to write {}", path.display()))?;
+        Ok(path)
+    }
+
     /// Strictly ISO `events/YYYY-MM-DD.md`.
     #[must_use]
     pub fn day_path(&self, date: NaiveDate) -> PathBuf {
@@ -269,6 +320,26 @@ impl Store {
     }
 }
 
+fn slugify(title: &str) -> String {
+    let mut out = String::new();
+    let mut prev_dash = false;
+    for ch in title.trim().chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_lowercase());
+            prev_dash = false;
+        } else if (ch.is_whitespace() || ch == '-' || ch == '_') && !out.is_empty() && !prev_dash {
+            out.push('-');
+            prev_dash = true;
+        }
+    }
+    let trimmed = out.trim_matches('-');
+    if trimmed.is_empty() {
+        String::from("task")
+    } else {
+        trimmed.to_owned()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -460,5 +531,39 @@ mod tests {
         // Other weekdays are untouched by a Monday query.
         let tuesday = NaiveDate::from_ymd_opt(2026, 11, 24).unwrap();
         assert!(store.read_repeatables(tuesday).unwrap().is_empty());
+    }
+
+    #[test]
+    fn write_agent_task_creates_file_and_handles_collisions() {
+        let (_tmp, store) = store();
+        let first = store
+            .write_agent_task(
+                date(),
+                "Fix bug!",
+                "high",
+                Some("chora/store.md"),
+                "- [ ] check\n",
+            )
+            .unwrap();
+        assert_eq!(
+            first.file_name().unwrap().to_str().unwrap(),
+            "2026-11-20-fix-bug.md"
+        );
+        let second = store
+            .write_agent_task(
+                date(),
+                "Fix bug!",
+                "high",
+                Some("chora/store.md"),
+                "- [ ] check\n",
+            )
+            .unwrap();
+        assert_eq!(
+            second.file_name().unwrap().to_str().unwrap(),
+            "2026-11-20-fix-bug-2.md"
+        );
+        let text = std::fs::read_to_string(&first).unwrap();
+        assert!(text.contains("Priority: high"), "{text}");
+        assert!(text.contains("Project: chora/store.md"), "{text}");
     }
 }

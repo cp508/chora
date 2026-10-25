@@ -11,7 +11,10 @@ use std::path::Path;
 use anyhow::Context;
 
 /// Note visibility: `open < restricted < critical`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, clap::ValueEnum)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
+#[cfg_attr(feature = "cli", derive(clap::ValueEnum))]
 pub enum AccessLevel {
     /// Visible to everyone, including the default clearance.
     Open,
