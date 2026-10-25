@@ -1988,6 +1988,10 @@ fn index_shows_tree_and_filters() {
     assert!(text.contains("docs"));
     // Default restricted hides the critical entry.
     assert!(!text.contains("secret"));
+    // Events guide is always shown, placeholder never is.
+    assert!(text.contains("## Events"));
+    assert!(text.contains("monday"));
+    assert!(!text.contains("Describe all notes here"));
 
     let out = cmd(&env)
         .args(["--dir", &root.to_string_lossy(), "index", "--json"])
@@ -1997,6 +2001,79 @@ fn index_shows_tree_and_filters() {
         serde_json::from_str(&String::from_utf8_lossy(&out.stdout)).unwrap();
     assert_eq!(parsed["context"], "Test notes.");
     assert!(parsed["entries"].as_array().unwrap().len() >= 2);
+    assert!(parsed["events"].as_str().unwrap().contains("monday"));
+}
+
+#[test]
+fn index_events_shows_only_the_guide() {
+    let env = setup();
+    assert!(cmd(&env).arg("init").output().unwrap().status.success());
+    let root = storage(&env);
+    write_index(&root, TEST_INDEX);
+
+    let out = cmd(&env)
+        .args(["--dir", &root.to_string_lossy(), "index", "events"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(text.contains("monday"));
+    assert!(text.contains("sunday"));
+    assert!(text.contains("all 7 weekday"));
+    assert!(!text.contains("Test notes."));
+
+    let out = cmd(&env)
+        .args([
+            "--dir",
+            &root.to_string_lossy(),
+            "index",
+            "events",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let parsed: serde_json::Value =
+        serde_json::from_str(&String::from_utf8_lossy(&out.stdout)).unwrap();
+    assert!(parsed["events"].as_str().unwrap().contains("repeatable"));
+}
+
+#[test]
+fn index_hides_legacy_placeholder() {
+    let env = setup();
+    assert!(cmd(&env).arg("init").output().unwrap().status.success());
+    let root = storage(&env);
+    write_index(
+        &root,
+        "# Context\n\nDescribe all notes here (English).\n\n## Notes\n",
+    );
+
+    let out = cmd(&env)
+        .args(["--dir", &root.to_string_lossy(), "index"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    assert!(
+        !String::from_utf8_lossy(&out.stdout).contains("Describe all notes here"),
+        "placeholder must not leak into index output"
+    );
+
+    let out = cmd(&env)
+        .args(["--dir", &root.to_string_lossy(), "index", "--json"])
+        .output()
+        .unwrap();
+    let parsed: serde_json::Value =
+        serde_json::from_str(&String::from_utf8_lossy(&out.stdout)).unwrap();
+    assert!(
+        !parsed["context"]
+            .as_str()
+            .unwrap()
+            .contains("Describe all notes here")
+    );
 }
 
 #[test]
@@ -2018,6 +2095,7 @@ fn open_index_creates_skeleton() {
     );
     let text = std::fs::read_to_string(root.join("index.md")).unwrap();
     assert!(text.contains("### docs"));
+    assert!(!text.contains("Describe all notes here"));
 }
 
 #[test]

@@ -37,7 +37,8 @@ Bare `chora` prints the whole tree (through `less -R` on a terminal, colors kept
 - `note override <DIR> --path <FILE>` — rewrite a note file with stdin markdown (creates it when missing).
 - `note show [<DIR>] [--path <FILE>]... [--json]` — all dirs with `security`/`about` (no bodies), or one dir / `.` (notes root) recursive with bodies, optionally scoped by `--path`. Unknown `<DIR>` errors and prints the all-dirs listing. `--json` prints an object for scripts.
 - `note headers <DIR> [--path <FILE>]...` — `#`-header tree with file names and line numbers, recursive.
-- `index [--json]` — show `index.md` context + `security`/`about` tree. Warnings go to stderr.
+- `index [--json]` — show `index.md` context + events guide (how events, weekdays, daily events work) + `security`/`about` tree. Warnings go to stderr.
+- `index events [--json]` — show only the events guide.
 - `event --date <DATE> --title <TITLE> --time <TIME> --duration <DUR> [--body <TEXT>] [--confirm]` — create an event at once, no editor. `--date` defaults to today. Sync runs in the background.
 - `event --date <DATE>` — append an event stub to the day file and open it in the file opener. Sync runs in the background after closing.
 - `event [--confirm]` — TUI form for creating an event. With `--confirm`, opens the day file after submit.

@@ -181,7 +181,14 @@ impl Index {
                 }
             }
         }
-        index.context = context_lines.join("\n").trim().to_owned();
+        index.context = context_lines
+            .join("\n")
+            .lines()
+            .filter(|line| line.trim() != Self::LEGACY_PLACEHOLDER)
+            .collect::<Vec<_>>()
+            .join("\n")
+            .trim()
+            .to_owned();
         Ok(index)
     }
 
@@ -194,6 +201,16 @@ impl Index {
             Err(err) => Err(err).with_context(|| format!("failed to read {}", path.display())),
         }
     }
+
+    /// Legacy skeleton placeholder: never shown in `chora index` output.
+    /// Old files keep it on disk, but `parse` drops the line so agents
+    /// never see it.
+    pub const LEGACY_PLACEHOLDER: &'static str = "Describe all notes here (English).";
+
+    /// Agent-readable events guide: how events are created, which weekdays
+    /// exist, how daily events work. Shown by `chora index` and
+    /// `chora index events` (events have no access levels).
+    pub const EVENTS_GUIDE: &'static str = "Events live in events/YYYY-MM-DD.md as ## sections with Time: HH:MM and Duration: <DUR>.\nCreate one without an editor: chora event --date <DATE> --title <TITLE> --time <HH:MM> --duration <DUR> [--body <TEXT>] (--date defaults to today).\nOr append a stub and edit by hand: chora event --date <DATE>, or the TUI chora event, or chora open event.\n<DATE> is today|tomorrow|YYYY-MM-DD|DD.MM.YYYY. <TIME> is HH:MM or H (9 = 09:00). <DUR> is 30m, 2h20m, 2h 20m, 2:00 (=2h), 1:30 (=1h30m), 10s.\nSections without valid Time:/Duration: are plain day text, skipped by event show; day output is sorted by time.\nRepeatable events: events/repeatable/<weekday>.md, same section format, no dedicated command (edit via chora open event).\nWeekdays (lowercase English): monday, tuesday, wednesday, thursday, friday, saturday, sunday. Other file names are invisible.\nevent show --date <DATE> merges the day file with that weekday's repeatable. Daily event: put the same ## section into all 7 weekday files.\nOld-day sweep (manage_old_event) never touches repeatable/.\n";
 
     /// Effective security for a `/`-joined relative note path:
     /// the longest-prefix entry wins, else `open`.
@@ -238,7 +255,7 @@ impl Index {
     /// Starter file: `# Context` + one `###` per existing top-level dirname.
     #[must_use]
     pub fn skeleton(dirs: &[String]) -> String {
-        let mut out = String::from("# Context\n\nDescribe all notes here (English).\n\n## Notes\n");
+        let mut out = String::from("# Context\n\n## Notes\n");
         for dir in dirs {
             out.push_str(&format!("\n### {dir}\nsecurity: open\nabout: \n"));
         }
@@ -329,5 +346,42 @@ mod tests {
         assert!(index.entries.is_empty());
         assert_eq!(index.security_for("a/b.md"), AccessLevel::Open);
         assert_eq!(index.about_for("a/b.md"), "");
+    }
+
+    #[test]
+    fn skeleton_has_no_placeholder() {
+        let text = Index::skeleton(&[String::from("docs")]);
+        assert!(!text.contains(Index::LEGACY_PLACEHOLDER));
+        assert!(text.contains("### docs"));
+    }
+
+    #[test]
+    fn parse_drops_legacy_placeholder() {
+        let index =
+            Index::parse("# Context\n\nDescribe all notes here (English).\n\n## Notes\n").unwrap();
+        assert!(index.context.is_empty());
+        let index = Index::parse(
+            "# Context\n\nReal context.\nDescribe all notes here (English).\n\n## Notes\n",
+        )
+        .unwrap();
+        assert_eq!(index.context, "Real context.");
+    }
+
+    #[test]
+    fn events_guide_lists_weekdays_and_daily() {
+        for day in [
+            "monday",
+            "tuesday",
+            "wednesday",
+            "thursday",
+            "friday",
+            "saturday",
+            "sunday",
+        ] {
+            assert!(Index::EVENTS_GUIDE.contains(day), "guide misses {day}");
+        }
+        assert!(Index::EVENTS_GUIDE.contains("repeatable"));
+        assert!(Index::EVENTS_GUIDE.contains("all 7 weekday"));
+        assert!(Index::EVENTS_GUIDE.contains("chora event --date"));
     }
 }

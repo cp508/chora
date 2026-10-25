@@ -437,7 +437,14 @@ pub fn unknown_dir_warnings(index: &Index, notes: &Path) -> Vec<Warning> {
             continue;
         }
         seen.push(top);
-        if !notes.join(top).is_dir() {
+        // Loose `notes/*.md` files are entries too (`now.md`): they exist
+        // as files, not dirs, so check accordingly.
+        let exists = if top.ends_with(".md") {
+            notes.join(top).is_file()
+        } else {
+            notes.join(top).is_dir()
+        };
+        if !exists {
             warnings.push(Warning {
                 path: Some(entry.path.clone()),
                 msg: format!("unknown dirname `{top}`: not in notes/"),
@@ -520,7 +527,18 @@ pub fn render_dir(dir: &DirView) -> String {
     out
 }
 
-/// `chora index`: context plus visible entries, original header levels.
+/// `chora index events`: just the events guide, no clearance filtering.
+#[must_use]
+pub fn render_events() -> String {
+    let mut out = String::from("# Events\n");
+    out.push_str(Index::EVENTS_GUIDE);
+    if !Index::EVENTS_GUIDE.ends_with('\n') {
+        out.push('\n');
+    }
+    out
+}
+
+/// `chora index`: context plus events guide plus visible entries.
 #[must_use]
 pub fn render_index(index: &Index, max: AccessLevel) -> String {
     let mut out = String::from("# Context\n");
@@ -528,6 +546,11 @@ pub fn render_index(index: &Index, max: AccessLevel) -> String {
         out.push_str("(empty)\n");
     } else {
         out.push_str(&index.context);
+        out.push('\n');
+    }
+    out.push_str("\n## Events\n");
+    out.push_str(Index::EVENTS_GUIDE);
+    if !Index::EVENTS_GUIDE.ends_with('\n') {
         out.push('\n');
     }
     out.push_str("\n## Notes\n");
@@ -710,5 +733,48 @@ mod tests {
         assert_eq!(first_h1("## Only h2\n"), None);
         assert_eq!(first_h1("plain text\n"), None);
         assert_eq!(first_h1(""), None);
+    }
+
+    #[test]
+    fn render_index_embeds_events_guide() {
+        let index =
+            Index::parse("# Context\n\nHi.\n\n## Notes\n\n### docs\nsecurity: open\nabout: Docs\n")
+                .unwrap();
+        let text = render_index(&index, AccessLevel::Open);
+        assert!(text.contains("# Context"));
+        assert!(text.contains("## Events"));
+        assert!(text.contains("monday"));
+        assert!(text.contains("## Notes"));
+        assert!(text.contains("docs"));
+    }
+
+    #[test]
+    fn render_events_is_just_the_guide() {
+        let text = render_events();
+        assert!(text.starts_with("# Events\n"));
+        assert!(text.contains("monday"));
+        assert!(text.contains("sunday"));
+    }
+
+    #[test]
+    fn unknown_dir_warnings_ignore_existing_loose_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let notes = tmp.path().join("notes");
+        std::fs::create_dir_all(&notes).unwrap();
+        std::fs::write(notes.join("now.md"), "# Now\n").unwrap();
+        std::fs::create_dir_all(notes.join("docs")).unwrap();
+        let index = Index::parse("## Notes\n\n### now.md\nabout: Loose\n\n### docs\nabout: Docs\n")
+            .unwrap();
+        assert!(unknown_dir_warnings(&index, &notes).is_empty());
+    }
+
+    #[test]
+    fn unknown_dir_warnings_still_fire_when_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let notes = tmp.path().join("notes");
+        std::fs::create_dir_all(&notes).unwrap();
+        let index = Index::parse("## Notes\n\n### now.md\nabout: Loose\n\n### docs\nabout: Docs\n")
+            .unwrap();
+        assert_eq!(unknown_dir_warnings(&index, &notes).len(), 2);
     }
 }

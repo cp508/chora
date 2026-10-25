@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 use chora::cli::{
-    Cli, Cmd, CompletionShell, EventAction, NoteAction, OpenTarget, parse_date_arg,
+    Cli, Cmd, CompletionShell, EventAction, IndexAction, NoteAction, OpenTarget, parse_date_arg,
     render_help_tree, render_skill_help, today,
 };
 use chora::config::{Config, OldEventPolicy};
@@ -116,9 +116,14 @@ fn main() -> anyhow::Result<()> {
                 }
             }
         }
-        Cmd::Index { json } => {
+        Cmd::Index { json, action } => {
             let (_cfg, store) = load_store(cli.dir.as_deref(), false)?;
-            cmd_index(&store, json, cli.max_access)
+            match action {
+                None => cmd_index(&store, json, cli.max_access),
+                Some(IndexAction::Events { json: events_json }) => {
+                    cmd_index_events(json || events_json)
+                }
+            }
         }
         Cmd::Event {
             date,
@@ -809,7 +814,7 @@ fn cmd_note_headers(
     Ok(())
 }
 
-/// Read-only: `index.md` context + security/about tree.
+/// Read-only: `index.md` context + events guide + security/about tree.
 /// Showing never creates storage and touches no network.
 fn cmd_index(store: &Store, json: bool, max: AccessLevel) -> anyhow::Result<()> {
     let index = Index::load(store.root())?;
@@ -845,6 +850,7 @@ fn cmd_index(store: &Store, json: bool, max: AccessLevel) -> anyhow::Result<()> 
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
                 "context": index.context,
+                "events": Index::EVENTS_GUIDE,
                 "entries": entries,
                 "warnings": warnings,
             }))?
@@ -854,6 +860,21 @@ fn cmd_index(store: &Store, json: bool, max: AccessLevel) -> anyhow::Result<()> 
     }
     for warning in &warnings {
         eprintln!("warning: {warning}");
+    }
+    Ok(())
+}
+
+/// Read-only: only the events guide. No storage scan, no network.
+fn cmd_index_events(json: bool) -> anyhow::Result<()> {
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "events": Index::EVENTS_GUIDE,
+            }))?
+        );
+    } else {
+        print!("{}", note::render_events());
     }
     Ok(())
 }

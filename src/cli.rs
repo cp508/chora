@@ -385,6 +385,18 @@ pub enum NoteAction {
     },
 }
 
+/// Actions under `index`.
+#[derive(Debug, Subcommand)]
+pub enum IndexAction {
+    /// Show only the events guide (how events, weekdays, daily events work).
+    #[command(disable_help_flag = true)]
+    Events {
+        /// JSON object for scripts.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
 /// Shells with generated completions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum CompletionShell {
@@ -441,12 +453,14 @@ pub enum Cmd {
         #[command(subcommand)]
         action: NoteAction,
     },
-    /// Show `index.md` context + security/about tree (`--json` for scripts).
+    /// Show `index.md` context + events guide + security/about tree (`--json` for scripts).
     #[command(disable_help_flag = true)]
     Index {
-        /// JSON object for scripts (`--max-access` still filters).
+        /// JSON object for scripts (`--max-access` still filters notes).
         #[arg(long)]
         json: bool,
+        #[command(subcommand)]
+        action: Option<IndexAction>,
     },
     /// Short machine-readable usage for AI agents (same as `skill`).
     #[command(alias = "skill", disable_help_flag = true)]
@@ -842,6 +856,7 @@ mod tests {
             "chora note show",
             "chora note headers",
             "chora index",
+            "chora index events",
         ] {
             assert!(text.contains(path), "skill misses `{path}`");
         }
@@ -944,7 +959,41 @@ mod tests {
             })
         ));
         let cli = Cli::try_parse_from(["chora", "index", "--json"]).unwrap();
-        assert!(matches!(cli.cmd, Some(Cmd::Index { json: true })));
+        assert!(matches!(
+            cli.cmd,
+            Some(Cmd::Index {
+                json: true,
+                action: None
+            })
+        ));
+    }
+
+    #[test]
+    fn parses_index_events() {
+        let cli = Cli::try_parse_from(["chora", "index", "events"]).unwrap();
+        assert!(matches!(
+            cli.cmd,
+            Some(Cmd::Index {
+                json: false,
+                action: Some(IndexAction::Events { json: false })
+            })
+        ));
+        let cli = Cli::try_parse_from(["chora", "index", "events", "--json"]).unwrap();
+        assert!(matches!(
+            cli.cmd,
+            Some(Cmd::Index {
+                action: Some(IndexAction::Events { json: true }),
+                ..
+            })
+        ));
+        let cli = Cli::try_parse_from(["chora", "index", "--json", "events"]).unwrap();
+        assert!(matches!(
+            cli.cmd,
+            Some(Cmd::Index {
+                json: true,
+                action: Some(IndexAction::Events { .. })
+            })
+        ));
     }
 
     #[test]
