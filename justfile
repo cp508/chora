@@ -30,3 +30,10 @@ completions:
         *fish*) "$SHELL" -c 'chora completion fish | source';; \
         *bash*) "$SHELL" -c 'eval "$(chora completion bash)"';; \
     esac
+
+# publish to crates.io, token from sops/api.yaml (never in history/env files)
+cargo_deploy: qa
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export CARGO_REGISTRY_TOKEN="$(sops decrypt --extract '["cargo_api"]' sops/api.yaml)"
+    cargo publish
