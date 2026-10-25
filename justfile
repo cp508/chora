@@ -1,14 +1,16 @@
 @_default:
     just --list --unsorted
 
-# fmt + lint
+# fmt + lint (full CLI build + no-default library for mobile)
 check:
     cargo fmt --all -- --check
     cargo clippy --all-targets --all-features -- -D warnings
+    cargo clippy --lib --no-default-features -- -D warnings
 
 # just check + auto tests
 qa: check
     cargo test
+    cargo test --lib --no-default-features
 
 # build debug
 debug:
