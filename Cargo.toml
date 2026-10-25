@@ -1,6 +1,6 @@
 [package]
 name = "chora"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 rust-version = "1.99"
 description = "Lightweight CLI organizer: markdown notes, day events, git sync"
@@ -21,11 +21,11 @@ path = "src/lib.rs"
 [features]
 default = ["cli"]
 cli = [
-    "dep:clap",
-    "dep:clap_complete",
-    "dep:crossterm",
-    "dep:ratatui",
-    "dep:shell-words",
+  "dep:clap",
+  "dep:clap_complete",
+  "dep:crossterm",
+  "dep:ratatui",
+  "dep:shell-words",
 ]
 
 [dependencies]
