@@ -4,10 +4,13 @@ pub mod calendar;
 #[cfg(feature = "cli")]
 pub mod cli;
 pub mod config;
+pub mod conflict;
+pub mod edit;
 #[cfg(feature = "cli")]
 pub mod editor;
 pub mod error;
 pub mod event;
+pub mod fsx;
 #[cfg(feature = "cli")]
 pub mod git;
 pub mod index;

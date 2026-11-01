@@ -106,8 +106,7 @@ impl Store {
             text.push_str(trimmed_body);
             text.push('\n');
         }
-        std::fs::write(&path, text)
-            .with_context(|| format!("failed to write {}", path.display()))?;
+        crate::fsx::write_atomic(&path, &text)?;
         Ok(path)
     }
 
@@ -306,17 +305,9 @@ impl Store {
     /// Fails when the day file cannot be created, read or written.
     pub fn append_section(&self, date: NaiveDate, section: &str) -> anyhow::Result<()> {
         let path = self.ensure_day_file(date)?;
-        let mut text = std::fs::read_to_string(&path)
+        let text = std::fs::read_to_string(&path)
             .with_context(|| format!("failed to read {}", path.display()))?;
-        if !text.ends_with('\n') {
-            text.push('\n');
-        }
-        text.push('\n');
-        text.push_str(section.trim_matches('\n'));
-        text.push('\n');
-        std::fs::write(&path, text)
-            .with_context(|| format!("failed to write {}", path.display()))?;
-        Ok(())
+        crate::fsx::write_atomic(&path, &crate::fsx::append_block(&text, section))
     }
 }
 

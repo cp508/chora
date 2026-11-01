@@ -140,6 +140,27 @@ pub enum ChoraError {
         "event needs --title, --time and --duration (optional --date defaults to today, --body for context)"
     )]
     EventNeedsFields,
+
+    /// The file changed on disk since it was read (another device synced).
+    #[error("`{0}` changed on disk, reload it")]
+    Changed(
+        /// What changed: a note path or an event title.
+        String,
+    ),
+
+    /// A checkbox toggle aimed at a line that is not a task.
+    #[error("line {0} is not a task")]
+    NotATask(
+        /// 1-based line number.
+        usize,
+    ),
+
+    /// A path that is not a Syncthing `.sync-conflict-` copy.
+    #[error("`{0}` is not a sync conflict copy")]
+    NotAConflict(
+        /// Rejected path.
+        String,
+    ),
 }
 
 #[cfg(test)]

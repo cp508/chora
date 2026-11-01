@@ -591,33 +591,7 @@ fn cmd_note_add(
     let body = read_stdin_body()?;
     let body = format!("{}\n", body.trim_matches('\n'));
     sync::with_sync_lock(store.root(), || {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("failed to create {}", parent.display()))?;
-        }
-        if path.exists() {
-            let mut text = std::fs::read_to_string(&path)
-                .with_context(|| format!("failed to read {}", path.display()))?;
-            if let Some(header) = under {
-                text = note::insert_under(&text, header, body.trim_matches('\n'))?;
-            } else {
-                if !text.ends_with('\n') {
-                    text.push('\n');
-                }
-                text.push('\n');
-                text.push_str(body.trim_matches('\n'));
-                text.push('\n');
-            }
-            std::fs::write(&path, text)
-                .with_context(|| format!("failed to write {}", path.display()))?;
-        } else {
-            if under.is_some() {
-                anyhow::bail!("no such file `{full}`: `--under` needs an existing file");
-            }
-            std::fs::write(&path, &body)
-                .with_context(|| format!("failed to write {}", path.display()))?;
-        }
-        Ok(())
+        chora::edit::append_note(&path, &full, under, &body)
     })?;
     let message = format!("note add: {full}");
     sync_in_background(store, &message)?;
@@ -646,13 +620,7 @@ fn cmd_note_override(
     }
     let body = read_stdin_body()?;
     sync::with_sync_lock(store.root(), || {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("failed to create {}", parent.display()))?;
-        }
-        std::fs::write(&path, format!("{}\n", body.trim_matches('\n')))
-            .with_context(|| format!("failed to write {}", path.display()))?;
-        Ok(())
+        chora::fsx::write_atomic(&path, &format!("{}\n", body.trim_matches('\n')))
     })?;
     let message = format!("note override: {full}");
     sync_in_background(store, &message)?;
