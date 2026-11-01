@@ -15,6 +15,7 @@ pub mod fsx;
 pub mod git;
 pub mod index;
 pub mod log;
+pub mod manage;
 pub mod note;
 pub mod output;
 pub mod store;

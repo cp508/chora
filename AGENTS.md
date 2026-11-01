@@ -14,6 +14,8 @@ Single user, one or two machines. Storage is a plain git repo (`~/chora` by defa
 - `src/fsx.rs` — atomic writes (`write_atomic`); every user-file overwrite goes through it.
 - `src/edit.rs` — checked edits for library users (mobile): note save/toggle against a `base` text,
   event add/update/delete by value (`EventFile::{Day, Weekly}`); a sync in between is `ChoraError::Changed`.
+- `src/manage.rs` — note files/dirs for library users: create (trailing `/` = dir), rename, trash to
+  `trash/<YYYY-MM-DD>/`, purge after 30 days.
 - `src/conflict.rs` — Syncthing `.sync-conflict-` copies (list/resolve) and a metadata change `stamp`.
 - `src/config.rs`, `src/git.rs`, `src/sync.rs`, `src/tui.rs`, `src/calendar.rs`, `src/output.rs`.
 - `tests/e2e.rs` — end-to-end via built binary with isolated `HOME`.

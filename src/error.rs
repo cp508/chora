@@ -155,6 +155,13 @@ pub enum ChoraError {
         usize,
     ),
 
+    /// Create or rename target already exists.
+    #[error("`{0}` already exists")]
+    NoteExists(
+        /// Path relative to `notes/`.
+        String,
+    ),
+
     /// A path that is not a Syncthing `.sync-conflict-` copy.
     #[error("`{0}` is not a sync conflict copy")]
     NotAConflict(
